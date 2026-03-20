@@ -441,14 +441,18 @@ func (ts turnEventScope) meta(iteration int, source, tracePath string) EventMeta
 }
 
 func (al *AgentLoop) emitEvent(kind EventKind, meta EventMeta, payload any) {
-	if al == nil || al.eventBus == nil {
-		return
-	}
-	al.eventBus.Emit(Event{
+	evt := Event{
 		Kind:    kind,
 		Meta:    meta,
 		Payload: payload,
-	})
+	}
+
+	al.logEvent(evt)
+
+	if al == nil || al.eventBus == nil {
+		return
+	}
+	al.eventBus.Emit(evt)
 }
 
 func cloneEventArguments(args map[string]any) map[string]any {
@@ -461,6 +465,60 @@ func cloneEventArguments(args map[string]any) map[string]any {
 		cloned[k] = v
 	}
 	return cloned
+}
+
+func (al *AgentLoop) logEvent(evt Event) {
+	fields := map[string]any{
+		"event_kind":  evt.Kind.String(),
+		"agent_id":    evt.Meta.AgentID,
+		"turn_id":     evt.Meta.TurnID,
+		"session_key": evt.Meta.SessionKey,
+		"iteration":   evt.Meta.Iteration,
+	}
+
+	if evt.Meta.TracePath != "" {
+		fields["trace"] = evt.Meta.TracePath
+	}
+	if evt.Meta.Source != "" {
+		fields["source"] = evt.Meta.Source
+	}
+
+	switch payload := evt.Payload.(type) {
+	case TurnStartPayload:
+		fields["channel"] = payload.Channel
+		fields["chat_id"] = payload.ChatID
+		fields["user_len"] = len(payload.UserMessage)
+		fields["media_count"] = payload.MediaCount
+	case TurnEndPayload:
+		fields["status"] = payload.Status
+		fields["iterations_total"] = payload.Iterations
+		fields["duration_ms"] = payload.Duration.Milliseconds()
+		fields["final_len"] = payload.FinalContentLen
+	case LLMRequestPayload:
+		fields["model"] = payload.Model
+		fields["messages"] = payload.MessagesCount
+		fields["tools"] = payload.ToolsCount
+		fields["max_tokens"] = payload.MaxTokens
+	case LLMResponsePayload:
+		fields["content_len"] = payload.ContentLen
+		fields["tool_calls"] = payload.ToolCalls
+		fields["has_reasoning"] = payload.HasReasoning
+	case ToolExecStartPayload:
+		fields["tool"] = payload.Tool
+		fields["args_count"] = len(payload.Arguments)
+	case ToolExecEndPayload:
+		fields["tool"] = payload.Tool
+		fields["duration_ms"] = payload.Duration.Milliseconds()
+		fields["for_llm_len"] = payload.ForLLMLen
+		fields["for_user_len"] = payload.ForUserLen
+		fields["is_error"] = payload.IsError
+		fields["async"] = payload.Async
+	case ErrorPayload:
+		fields["stage"] = payload.Stage
+		fields["error"] = payload.Message
+	}
+
+	logger.InfoCF("eventbus", fmt.Sprintf("Agent event: %s", evt.Kind.String()), fields)
 }
 
 func (al *AgentLoop) RegisterTool(tool tools.Tool) {
