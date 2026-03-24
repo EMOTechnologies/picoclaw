@@ -10,6 +10,9 @@ const (
 	wecomCmdEventCallback    = "aibot_event_callback"
 	wecomCmdRespondMsg       = "aibot_respond_msg"
 	wecomCmdSendMsg          = "aibot_send_msg"
+	wecomCmdUploadMediaInit  = "aibot_upload_media_init"
+	wecomCmdUploadMediaChunk = "aibot_upload_media_chunk"
+	wecomCmdUploadMediaEnd   = "aibot_upload_media_finish"
 	wecomMaxContentBytes     = 20480
 )
 
@@ -32,15 +35,26 @@ type wecomCommand struct {
 }
 
 type wecomSendMsgBody struct {
-	ChatID   string                `json:"chatid"`
-	ChatType uint32                `json:"chat_type,omitempty"`
-	MsgType  string                `json:"msgtype"`
-	Markdown *wecomMarkdownContent `json:"markdown,omitempty"`
+	ChatID       string                `json:"chatid"`
+	ChatType     uint32                `json:"chat_type,omitempty"`
+	MsgType      string                `json:"msgtype"`
+	Markdown     *wecomMarkdownContent `json:"markdown,omitempty"`
+	File         *wecomMediaRefContent `json:"file,omitempty"`
+	Image        *wecomMediaRefContent `json:"image,omitempty"`
+	Voice        *wecomMediaRefContent `json:"voice,omitempty"`
+	Video        *wecomVideoContent    `json:"video,omitempty"`
+	TemplateCard map[string]any        `json:"template_card,omitempty"`
 }
 
 type wecomRespondMsgBody struct {
-	MsgType string              `json:"msgtype"`
-	Stream  *wecomStreamContent `json:"stream,omitempty"`
+	MsgType      string                `json:"msgtype"`
+	Stream       *wecomStreamContent   `json:"stream,omitempty"`
+	Markdown     *wecomMarkdownContent `json:"markdown,omitempty"`
+	File         *wecomMediaRefContent `json:"file,omitempty"`
+	Image        *wecomMediaRefContent `json:"image,omitempty"`
+	Voice        *wecomMediaRefContent `json:"voice,omitempty"`
+	Video        *wecomVideoContent    `json:"video,omitempty"`
+	TemplateCard map[string]any        `json:"template_card,omitempty"`
 }
 
 type wecomStreamContent struct {
@@ -51,6 +65,44 @@ type wecomStreamContent struct {
 
 type wecomMarkdownContent struct {
 	Content string `json:"content"`
+}
+
+type wecomMediaRefContent struct {
+	MediaID string `json:"media_id"`
+}
+
+type wecomVideoContent struct {
+	MediaID     string `json:"media_id"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type wecomUploadMediaInitBody struct {
+	Type        string `json:"type"`
+	Filename    string `json:"filename"`
+	TotalSize   int64  `json:"total_size"`
+	TotalChunks int    `json:"total_chunks"`
+	MD5         string `json:"md5,omitempty"`
+}
+
+type wecomUploadMediaInitResponse struct {
+	UploadID string `json:"upload_id"`
+}
+
+type wecomUploadMediaChunkBody struct {
+	UploadID   string `json:"upload_id"`
+	ChunkIndex int    `json:"chunk_index"`
+	Base64Data string `json:"base64_data"`
+}
+
+type wecomUploadMediaFinishBody struct {
+	UploadID string `json:"upload_id"`
+}
+
+type wecomUploadMediaFinishResponse struct {
+	Type      string          `json:"type"`
+	MediaID   string          `json:"media_id"`
+	CreatedAt json.RawMessage `json:"created_at"`
 }
 
 type wecomIncomingMessage struct {

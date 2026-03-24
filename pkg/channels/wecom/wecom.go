@@ -23,6 +23,7 @@ import (
 const (
 	wecomConnectTimeout    = 15 * time.Second
 	wecomCommandTimeout    = 10 * time.Second
+	wecomUploadTimeout     = 30 * time.Second
 	wecomHeartbeatInterval = 30 * time.Second
 	wecomStreamMaxDuration = 5*time.Minute + 30*time.Second
 	wecomRouteTTL          = 30 * time.Minute
@@ -49,7 +50,7 @@ type WeComChannel struct {
 	recent      *recentMessageSet
 	routes      *reqIDStore
 	mediaClient *http.Client
-	commandSend func(wecomCommand, time.Duration) error
+	commandSend func(wecomCommand, time.Duration) (wecomEnvelope, error)
 }
 
 type wecomTurn struct {
@@ -187,22 +188,74 @@ func (c *WeComChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 	if !c.IsRunning() {
 		return channels.ErrNotRunning
 	}
-	var parts []string
+
+	route, chatType, hasTurn := c.resolveMediaRoute(msg.ChatID)
+	chatID := route.ChatID
+	if chatID == "" {
+		chatID = msg.ChatID
+	}
+
 	for _, part := range msg.Parts {
-		switch {
-		case part.Caption != "":
-			parts = append(parts, part.Caption)
-		case part.Filename != "":
-			parts = append(parts, fmt.Sprintf("[media: %s]", part.Filename))
-		default:
-			parts = append(parts, "[media attachments are not yet supported]")
+		if strings.TrimSpace(part.Ref) == "" {
+			if caption := strings.TrimSpace(part.Caption); caption != "" {
+				if err := c.sendActivePush(chatID, chatType, caption); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+
+		localPath, filename, contentType, cleanup, err := c.resolveOutboundPart(ctx, part)
+		if err != nil {
+			return fmt.Errorf("wecom resolve media %q: %v: %w", part.Ref, err, channels.ErrSendFailed)
+		}
+
+		func() {
+			if cleanup != nil {
+				defer cleanup()
+			}
+
+			uploaded, uploadErr := c.uploadOutboundMedia(ctx, localPath, filename, contentType, part)
+			if uploadErr != nil {
+				logger.WarnCF("wecom", "Falling back to placeholder after media upload failure", map[string]any{
+					"chat_id":      chatID,
+					"ref":          part.Ref,
+					"filename":     filename,
+					"content_type": contentType,
+					"error":        uploadErr.Error(),
+				})
+				if hasTurn {
+					if finishErr := c.sendStreamChunk(route, true, ""); finishErr != nil {
+						err = finishErr
+						return
+					}
+					c.deleteTurn(msg.ChatID)
+					hasTurn = false
+				}
+				err = c.sendActivePush(chatID, chatType, fallbackWeComMediaText(part, "", filename))
+				return
+			}
+
+			if hasTurn {
+				err = c.sendTurnMedia(route, uploaded)
+				c.deleteTurn(msg.ChatID)
+				hasTurn = false
+			} else {
+				err = c.sendActiveMedia(chatID, chatType, uploaded)
+			}
+			if err != nil {
+				return
+			}
+			if caption := strings.TrimSpace(part.Caption); caption != "" {
+				err = c.sendActivePush(chatID, chatType, caption)
+			}
+		}()
+		if err != nil {
+			return err
 		}
 	}
-	return c.Send(ctx, bus.OutboundMessage{
-		Channel: msg.Channel,
-		ChatID:  msg.ChatID,
-		Content: strings.Join(parts, "\n"),
-	})
+
+	return nil
 }
 
 func (c *WeComChannel) connectLoop() {
@@ -620,6 +673,20 @@ func (c *WeComChannel) sendStreamChunk(turn wecomTurn, finish bool, content stri
 	}, wecomCommandTimeout)
 }
 
+func (c *WeComChannel) sendTurnMedia(turn wecomTurn, uploaded *wecomOutboundMedia) error {
+	if uploaded == nil {
+		return fmt.Errorf("wecom outbound media is nil: %w", channels.ErrSendFailed)
+	}
+	if err := c.sendCommand(wecomCommand{
+		Cmd:     wecomCmdRespondMsg,
+		Headers: wecomHeaders{ReqID: turn.ReqID},
+		Body:    uploaded.respondBody(),
+	}, wecomCommandTimeout); err != nil {
+		return err
+	}
+	return c.sendStreamChunk(turn, true, "")
+}
+
 func (c *WeComChannel) sendActivePush(chatID string, chatType uint32, content string) error {
 	if strings.TrimSpace(chatID) == "" {
 		return fmt.Errorf("empty chat ID: %w", channels.ErrSendFailed)
@@ -641,24 +708,57 @@ func (c *WeComChannel) sendActivePush(chatID string, chatType uint32, content st
 	return nil
 }
 
+func (c *WeComChannel) sendActiveMedia(chatID string, chatType uint32, uploaded *wecomOutboundMedia) error {
+	if strings.TrimSpace(chatID) == "" {
+		return fmt.Errorf("empty chat ID: %w", channels.ErrSendFailed)
+	}
+	if uploaded == nil {
+		return fmt.Errorf("wecom outbound media is nil: %w", channels.ErrSendFailed)
+	}
+	return c.sendCommand(wecomCommand{
+		Cmd:     wecomCmdSendMsg,
+		Headers: wecomHeaders{ReqID: randomID(10)},
+		Body:    uploaded.sendBody(chatID, chatType),
+	}, wecomCommandTimeout)
+}
+
 func (c *WeComChannel) sendCommand(cmd wecomCommand, timeout time.Duration) error {
+	_, err := c.sendCommandAck(cmd, timeout)
+	return err
+}
+
+func (c *WeComChannel) sendCommandAck(cmd wecomCommand, timeout time.Duration) (wecomEnvelope, error) {
 	if c.commandSend != nil {
 		return c.commandSend(cmd, timeout)
 	}
-	return c.writeCurrent(cmd, timeout)
+	return c.writeCurrentAck(cmd, timeout)
 }
 
 func (c *WeComChannel) writeCurrent(cmd wecomCommand, timeout time.Duration) error {
+	_, err := c.writeCurrentAck(cmd, timeout)
+	return err
+}
+
+func (c *WeComChannel) writeCurrentAck(cmd wecomCommand, timeout time.Duration) (wecomEnvelope, error) {
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
 	if conn == nil {
-		return fmt.Errorf("wecom websocket not connected: %w", channels.ErrTemporary)
+		return wecomEnvelope{}, fmt.Errorf("wecom websocket not connected: %w", channels.ErrTemporary)
 	}
-	return c.writeAndWait(conn, cmd, timeout)
+	return c.writeAndWaitAck(conn, cmd, timeout)
 }
 
 func (c *WeComChannel) writeAndWait(conn *websocket.Conn, cmd wecomCommand, timeout time.Duration) error {
+	_, err := c.writeAndWaitAck(conn, cmd, timeout)
+	return err
+}
+
+func (c *WeComChannel) writeAndWaitAck(
+	conn *websocket.Conn,
+	cmd wecomCommand,
+	timeout time.Duration,
+) (wecomEnvelope, error) {
 	if cmd.Headers.ReqID == "" {
 		cmd.Headers.ReqID = randomID(10)
 	}
@@ -674,13 +774,13 @@ func (c *WeComChannel) writeAndWait(conn *websocket.Conn, cmd wecomCommand, time
 
 	data, err := json.Marshal(cmd)
 	if err != nil {
-		return fmt.Errorf("%w: %v", channels.ErrSendFailed, err)
+		return wecomEnvelope{}, fmt.Errorf("%w: %v", channels.ErrSendFailed, err)
 	}
 	c.connMu.Lock()
 	err = conn.WriteMessage(websocket.TextMessage, data)
 	c.connMu.Unlock()
 	if err != nil {
-		return fmt.Errorf("%w: %v", channels.ErrTemporary, err)
+		return wecomEnvelope{}, fmt.Errorf("%w: %v", channels.ErrTemporary, err)
 	}
 
 	timer := time.NewTimer(timeout)
@@ -688,13 +788,13 @@ func (c *WeComChannel) writeAndWait(conn *websocket.Conn, cmd wecomCommand, time
 	select {
 	case env := <-waitCh:
 		if env.ErrCode != 0 {
-			return fmt.Errorf("%w: wecom errcode=%d errmsg=%s", channels.ErrTemporary, env.ErrCode, env.ErrMsg)
+			return wecomEnvelope{}, fmt.Errorf("%w: wecom errcode=%d errmsg=%s", channels.ErrTemporary, env.ErrCode, env.ErrMsg)
 		}
-		return nil
+		return env, nil
 	case <-timer.C:
-		return fmt.Errorf("%w: timeout waiting for WeCom ack", channels.ErrTemporary)
+		return wecomEnvelope{}, fmt.Errorf("%w: timeout waiting for WeCom ack", channels.ErrTemporary)
 	case <-c.ctx.Done():
-		return c.ctx.Err()
+		return wecomEnvelope{}, c.ctx.Err()
 	}
 }
 
