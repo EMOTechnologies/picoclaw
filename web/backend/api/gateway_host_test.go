@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/netbind"
 	"github.com/sipeed/picoclaw/web/backend/launcherconfig"
 )
 
@@ -27,8 +28,8 @@ func TestGatewayHostOverrideUsesExplicitRuntimePublic(t *testing.T) {
 	h := NewHandler(configPath)
 	h.SetServerOptions(18800, true, true, nil)
 
-	if got := h.gatewayHostOverride(); got != resolveDefaultAnyHost() {
-		t.Fatalf("gatewayHostOverride() = %q, want %q", got, resolveDefaultAnyHost())
+	if got := h.gatewayHostOverride(); got != "*" {
+		t.Fatalf("gatewayHostOverride() = %q, want %q", got, "*")
 	}
 }
 
@@ -64,75 +65,37 @@ func TestBuildWsURLUsesRequestHostWhenLauncherPublicSaved(t *testing.T) {
 	}
 }
 
-func TestSelectAdaptiveLoopbackHost(t *testing.T) {
-	tests := []struct {
-		name    string
-		hasIPv4 bool
-		hasIPv6 bool
-		want    string
-	}{
-		{name: "dual stack prefers localhost", hasIPv4: true, hasIPv6: true, want: "localhost"},
-		{name: "ipv6 only", hasIPv4: false, hasIPv6: true, want: "::1"},
-		{name: "ipv4 only", hasIPv4: true, hasIPv6: false, want: "127.0.0.1"},
-		{name: "fallback", hasIPv4: false, hasIPv6: false, want: "localhost"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := selectAdaptiveLoopbackHost(tt.hasIPv4, tt.hasIPv6); got != tt.want {
-				t.Fatalf("selectAdaptiveLoopbackHost(%t, %t) = %q, want %q", tt.hasIPv4, tt.hasIPv6, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestSelectAdaptiveAnyHost(t *testing.T) {
-	tests := []struct {
-		name    string
-		hasIPv4 bool
-		hasIPv6 bool
-		want    string
-	}{
-		{name: "dual stack prefers ipv6 wildcard", hasIPv4: true, hasIPv6: true, want: "::"},
-		{name: "ipv6 only", hasIPv4: false, hasIPv6: true, want: "::"},
-		{name: "ipv4 only", hasIPv4: true, hasIPv6: false, want: "0.0.0.0"},
-		{name: "fallback", hasIPv4: false, hasIPv6: false, want: "::"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := selectAdaptiveAnyHost(tt.hasIPv4, tt.hasIPv6); got != tt.want {
-				t.Fatalf("selectAdaptiveAnyHost(%t, %t) = %q, want %q", tt.hasIPv4, tt.hasIPv6, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestGatewayProbeHostUsesLoopbackForWildcardBind(t *testing.T) {
-	want := resolveDefaultLoopbackHost()
+	want := "127.0.0.1"
 	if got := gatewayProbeHost("0.0.0.0"); got != want {
 		t.Fatalf("gatewayProbeHost() = %q, want %q", got, want)
 	}
 }
 
 func TestGatewayProbeHostUsesPreferredLoopbackForEmptyBind(t *testing.T) {
-	want := resolveDefaultLoopbackHost()
+	want := netbind.ResolveAdaptiveLoopbackHost()
 	if got := gatewayProbeHost(""); got != want {
 		t.Fatalf("gatewayProbeHost(empty) = %q, want %q", got, want)
 	}
 }
 
 func TestGatewayProbeHostUsesPreferredLoopbackForLocalhostBind(t *testing.T) {
-	want := resolveDefaultLoopbackHost()
+	want := netbind.ResolveAdaptiveLoopbackHost()
 	if got := gatewayProbeHost("localhost"); got != want {
 		t.Fatalf("gatewayProbeHost(localhost) = %q, want %q", got, want)
 	}
 }
 
 func TestGatewayProbeHostUsesLoopbackForIPv6WildcardBind(t *testing.T) {
-	want := resolveDefaultLoopbackHost()
+	want := "::1"
 	if got := gatewayProbeHost("::"); got != want {
 		t.Fatalf("gatewayProbeHost(::) = %q, want %q", got, want)
+	}
+}
+
+func TestGatewayProbeHostUsesFirstConcreteHostForMultiHostBind(t *testing.T) {
+	if got := gatewayProbeHost("127.0.0.1,::1"); got != "127.0.0.1" {
+		t.Fatalf("gatewayProbeHost(multi) = %q, want %q", got, "127.0.0.1")
 	}
 }
 
@@ -204,7 +167,7 @@ func TestGetGatewayHealthUsesProbeHostForPublicLauncher(t *testing.T) {
 	_ = statusCode
 	_ = err
 
-	want := "http://" + net.JoinHostPort(resolveDefaultLoopbackHost(), "18791") + "/health"
+	want := "http://" + net.JoinHostPort(netbind.ResolveAdaptiveLoopbackHost(), "18791") + "/health"
 	if requestedURL != want {
 		t.Fatalf("health url = %q, want %q", requestedURL, want)
 	}
@@ -310,23 +273,17 @@ func TestBuildWsURLUsesRequestHostNotGatewayBindLoopback(t *testing.T) {
 }
 
 func TestGatewayHostOverrideWithExplicitHostAndAlignedGatewayHost(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	writeGatewayHostConfig(t, configPath, "127.0.0.1")
-
-	h := NewHandler(configPath)
+	h := NewHandler(filepath.Join(t.TempDir(), "config.json"))
 	h.SetServerOptions(18800, false, false, nil)
 	h.SetServerBindHost("0.0.0.0", true)
 
-	if got := h.gatewayHostOverride(); got != resolveDefaultAnyHost() {
-		t.Fatalf("gatewayHostOverride() = %q, want %q", got, resolveDefaultAnyHost())
+	if got := h.gatewayHostOverride(); got != "0.0.0.0" {
+		t.Fatalf("gatewayHostOverride() = %q, want %q", got, "0.0.0.0")
 	}
 }
 
 func TestGatewayHostOverrideWithExplicitHostAndLocalhostGatewayHost(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	writeGatewayHostConfig(t, configPath, "localhost")
-
-	h := NewHandler(configPath)
+	h := NewHandler(filepath.Join(t.TempDir(), "config.json"))
 	h.SetServerOptions(18800, false, false, nil)
 	h.SetServerBindHost("::", true)
 
@@ -335,38 +292,22 @@ func TestGatewayHostOverrideWithExplicitHostAndLocalhostGatewayHost(t *testing.T
 	}
 }
 
-func TestGatewayHostOverrideWithExplicitHostAndMismatchedGatewayHost(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	writeGatewayHostConfig(t, configPath, "0.0.0.0")
-
-	h := NewHandler(configPath)
+func TestGatewayHostOverrideWithExplicitMultiHost(t *testing.T) {
+	h := NewHandler(filepath.Join(t.TempDir(), "config.json"))
 	h.SetServerOptions(18800, false, false, nil)
-	h.SetServerBindHost("192.168.1.10", true)
+	h.SetServerBindHost("127.0.0.1,::1", true)
 
-	if got := h.gatewayHostOverride(); got != "" {
-		t.Fatalf("gatewayHostOverride() = %q, want empty", got)
+	if got := h.gatewayHostOverride(); got != "127.0.0.1,::1" {
+		t.Fatalf("gatewayHostOverride() = %q, want %q", got, "127.0.0.1,::1")
 	}
 }
 
 func TestGatewayHostExplicitIgnoresPublicFlag(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	writeGatewayHostConfig(t, configPath, "127.0.0.1")
-
-	h := NewHandler(configPath)
+	h := NewHandler(filepath.Join(t.TempDir(), "config.json"))
 	h.SetServerOptions(18800, true, true, nil)
 	h.SetServerBindHost("127.0.0.1", true)
 
 	if got := h.effectiveLauncherPublic(); got {
 		t.Fatalf("effectiveLauncherPublic() = %t, want false when explicit host is set", got)
-	}
-}
-
-func writeGatewayHostConfig(t *testing.T, configPath, host string) {
-	t.Helper()
-
-	cfg := config.DefaultConfig()
-	cfg.Gateway.Host = host
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		t.Fatalf("SaveConfig() error = %v", err)
 	}
 }

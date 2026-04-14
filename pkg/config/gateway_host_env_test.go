@@ -39,7 +39,10 @@ func TestLoadConfig_GatewayHostBlankEnvFallsBackToConfigHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig() error: %v", err)
 	}
-	want := normalizeGatewayHost("localhost")
+	want, err := normalizeGatewayHostInput("localhost")
+	if err != nil {
+		t.Fatalf("normalizeGatewayHostInput() error: %v", err)
+	}
 	if cfg.Gateway.Host != want {
 		t.Fatalf("cfg.Gateway.Host = %q, want %q", cfg.Gateway.Host, want)
 	}
@@ -54,13 +57,16 @@ func TestLoadConfig_GatewayHostBlankEnvAndConfigFallsBackToDefault(t *testing.T)
 		t.Fatalf("LoadConfig() error: %v", err)
 	}
 
-	defaultHost := normalizeGatewayHost(DefaultConfig().Gateway.Host)
+	defaultHost, err := normalizeGatewayHostInput(DefaultConfig().Gateway.Host)
+	if err != nil {
+		t.Fatalf("normalizeGatewayHostInput() error: %v", err)
+	}
 	if cfg.Gateway.Host != defaultHost {
 		t.Fatalf("cfg.Gateway.Host = %q, want %q", cfg.Gateway.Host, defaultHost)
 	}
 }
 
-func TestLoadConfig_GatewayHostEnvWildcardUsesAdaptiveAnyHost(t *testing.T) {
+func TestLoadConfig_GatewayHostEnvPreservesExplicitWildcardHost(t *testing.T) {
 	configPath := writeGatewayHostTestConfig(t, "localhost")
 	t.Setenv(EnvGatewayHost, "  0.0.0.0  ")
 
@@ -69,8 +75,24 @@ func TestLoadConfig_GatewayHostEnvWildcardUsesAdaptiveAnyHost(t *testing.T) {
 		t.Fatalf("LoadConfig() error: %v", err)
 	}
 
-	want := normalizeGatewayHost("0.0.0.0")
+	want, err := normalizeGatewayHostInput("0.0.0.0")
+	if err != nil {
+		t.Fatalf("normalizeGatewayHostInput() error: %v", err)
+	}
 	if cfg.Gateway.Host != want {
 		t.Fatalf("cfg.Gateway.Host = %q, want %q", cfg.Gateway.Host, want)
+	}
+}
+
+func TestLoadConfig_GatewayHostEnvNormalizesMultiHostInput(t *testing.T) {
+	configPath := writeGatewayHostTestConfig(t, "localhost")
+	t.Setenv(EnvGatewayHost, " [::1] , 127.0.0.1 , ::1 ")
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Gateway.Host != "::1,127.0.0.1" {
+		t.Fatalf("cfg.Gateway.Host = %q, want %q", cfg.Gateway.Host, "::1,127.0.0.1")
 	}
 }

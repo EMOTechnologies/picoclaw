@@ -2,12 +2,11 @@ package config
 
 import (
 	"encoding/json"
-	"net"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/netbind"
 )
 
 const DefaultGatewayLogLevel = "warn"
@@ -52,119 +51,29 @@ func EffectiveGatewayLogLevel(cfg *Config) string {
 	return normalizeGatewayLogLevel(cfg.Gateway.LogLevel)
 }
 
-var (
-	gatewayIPFamiliesOnce sync.Once
-	gatewayHasIPv4        bool
-	gatewayHasIPv6        bool
-)
-
-func detectGatewayIPFamilies() (bool, bool) {
-	gatewayIPFamiliesOnce.Do(func() {
-		if ips, err := net.LookupIP("localhost"); err == nil {
-			for _, ip := range ips {
-				if ip == nil {
-					continue
-				}
-				if ip.To4() != nil {
-					gatewayHasIPv4 = true
-					continue
-				}
-				gatewayHasIPv6 = true
-			}
-		}
-
-		if gatewayHasIPv4 && gatewayHasIPv6 {
-			return
-		}
-
-		if addrs, err := net.InterfaceAddrs(); err == nil {
-			for _, addr := range addrs {
-				ipnet, ok := addr.(*net.IPNet)
-				if !ok || ipnet.IP == nil {
-					continue
-				}
-				if ipnet.IP.To4() != nil {
-					gatewayHasIPv4 = true
-					continue
-				}
-				gatewayHasIPv6 = true
-			}
-		}
-	})
-
-	return gatewayHasIPv4, gatewayHasIPv6
-}
-
-func selectAdaptiveGatewayLoopbackHost(hasIPv4, hasIPv6 bool) string {
-	switch {
-	case hasIPv4 && hasIPv6:
-		return "localhost"
-	case hasIPv6:
-		return "::1"
-	case hasIPv4:
-		return "127.0.0.1"
-	default:
-		return "localhost"
-	}
-}
-
-func selectAdaptiveGatewayAnyHost(hasIPv4, hasIPv6 bool) string {
-	switch {
-	case hasIPv4 && hasIPv6:
-		return "::"
-	case hasIPv6:
-		return "::"
-	case hasIPv4:
-		return "0.0.0.0"
-	default:
-		return "::"
-	}
-}
-
-func resolveAdaptiveGatewayLoopbackHost() string {
-	hasIPv4, hasIPv6 := detectGatewayIPFamilies()
-	return selectAdaptiveGatewayLoopbackHost(hasIPv4, hasIPv6)
-}
-
-func resolveAdaptiveGatewayAnyHost() string {
-	hasIPv4, hasIPv6 := detectGatewayIPFamilies()
-	return selectAdaptiveGatewayAnyHost(hasIPv4, hasIPv6)
-}
-
-func normalizeGatewayHost(host string) string {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		host = strings.TrimSpace(DefaultConfig().Gateway.Host)
-	}
-
-	if host == "" {
-		host = "localhost"
-	}
-
-	if strings.EqualFold(host, "localhost") {
-		return resolveAdaptiveGatewayLoopbackHost()
-	}
-
-	trimmed := strings.Trim(host, "[]")
-	if ip := net.ParseIP(trimmed); ip != nil && ip.IsUnspecified() {
-		return resolveAdaptiveGatewayAnyHost()
-	}
-
-	return host
-}
-
-func resolveGatewayHostFromEnv(baseHost string) string {
+func resolveGatewayHostFromEnv(baseHost string) (string, error) {
 	envHost, ok := os.LookupEnv(EnvGatewayHost)
 	if !ok {
-		return normalizeGatewayHost(baseHost)
+		return normalizeGatewayHostInput(baseHost)
 	}
 
 	envHost = strings.TrimSpace(envHost)
 	if envHost == "" {
-		return normalizeGatewayHost(baseHost)
+		return normalizeGatewayHostInput(baseHost)
 	}
 
-	return normalizeGatewayHost(envHost)
+	return normalizeGatewayHostInput(envHost)
+}
+
+func normalizeGatewayHostInput(host string) (string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		host = strings.TrimSpace(DefaultConfig().Gateway.Host)
+	}
+	if host == "" {
+		host = "localhost"
+	}
+	return netbind.NormalizeHostInput(host)
 }
 
 // ResolveGatewayLogLevel reads the configured gateway log level without triggering

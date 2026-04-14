@@ -7,90 +7,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
-
-var (
-	ipFamiliesOnce sync.Once
-	hasIPv4        bool
-	hasIPv6        bool
-)
-
-func DetectIPFamilies() (bool, bool) {
-	ipFamiliesOnce.Do(func() {
-		if ips, err := net.LookupIP("localhost"); err == nil {
-			for _, ip := range ips {
-				if ip == nil {
-					continue
-				}
-				if ip.To4() != nil {
-					hasIPv4 = true
-					continue
-				}
-				hasIPv6 = true
-			}
-		}
-
-		if hasIPv4 && hasIPv6 {
-			return
-		}
-
-		if addrs, err := net.InterfaceAddrs(); err == nil {
-			for _, addr := range addrs {
-				ipnet, ok := addr.(*net.IPNet)
-				if !ok || ipnet.IP == nil {
-					continue
-				}
-				if ipnet.IP.To4() != nil {
-					hasIPv4 = true
-					continue
-				}
-				hasIPv6 = true
-			}
-		}
-	})
-
-	return hasIPv4, hasIPv6
-}
-
-func SelectAdaptiveLoopbackHost(hasIPv4, hasIPv6 bool) string {
-	switch {
-	case hasIPv4 && hasIPv6:
-		return "localhost"
-	case hasIPv6:
-		return "::1"
-	case hasIPv4:
-		return "127.0.0.1"
-	default:
-		return "localhost"
-	}
-}
-
-func SelectAdaptiveAnyHost(hasIPv4, hasIPv6 bool) string {
-	switch {
-	case hasIPv4 && hasIPv6:
-		return "::"
-	case hasIPv6:
-		return "::"
-	case hasIPv4:
-		return "0.0.0.0"
-	default:
-		return "::"
-	}
-}
-
-func ResolveAdaptiveLoopbackHost() string {
-	hasIPv4, hasIPv6 := DetectIPFamilies()
-	return SelectAdaptiveLoopbackHost(hasIPv4, hasIPv6)
-}
-
-func ResolveAdaptiveAnyHost() string {
-	hasIPv4, hasIPv6 := DetectIPFamilies()
-	return SelectAdaptiveAnyHost(hasIPv4, hasIPv6)
-}
 
 // GetPicoclawHome returns the picoclaw home directory.
 // Priority: $PICOCLAW_HOME > ~/.picoclaw

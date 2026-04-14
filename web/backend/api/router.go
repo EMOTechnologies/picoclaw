@@ -14,7 +14,7 @@ type Handler struct {
 	serverPort           int
 	serverPublic         bool
 	serverPublicExplicit bool
-	serverHost           string
+	serverHostInput      string
 	serverHostExplicit   bool
 	serverCIDRs          []string
 	debug                bool
@@ -32,7 +32,6 @@ func NewHandler(configPath string) *Handler {
 	return &Handler{
 		configPath:  configPath,
 		serverPort:  launcherconfig.DefaultPort,
-		serverHost:  resolveDefaultLoopbackHost(),
 		oauthFlows:  make(map[string]*oauthFlow),
 		oauthState:  make(map[string]string),
 		weixinFlows: make(map[string]*weixinFlow),
@@ -45,28 +44,18 @@ func (h *Handler) SetServerOptions(port int, public bool, publicExplicit bool, a
 	h.serverPort = port
 	h.serverPublic = public
 	h.serverPublicExplicit = publicExplicit
-	h.serverHost = resolveDefaultLoopbackHost()
-	if public {
-		h.serverHost = resolveDefaultAnyHost()
-	}
+	h.serverHostInput = ""
 	h.serverHostExplicit = false
 	h.serverCIDRs = append([]string(nil), allowedCIDRs...)
 }
 
 // SetServerBindHost stores the launcher's effective bind host.
-// When explicit is true, the value came from the -host flag.
-func (h *Handler) SetServerBindHost(host string, explicit bool) {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		host = resolveDefaultLoopbackHost()
-		if h.serverPublic {
-			host = resolveDefaultAnyHost()
-		}
-		explicit = false
+// When explicit is true, hostInput is the normalized -host / PICOCLAW_LAUNCHER_HOST value.
+func (h *Handler) SetServerBindHost(hostInput string, explicit bool) {
+	h.serverHostInput = strings.TrimSpace(hostInput)
+	if !explicit {
+		h.serverHostInput = ""
 	}
-	host = canonicalLauncherBindHost(host)
-
-	h.serverHost = host
 	h.serverHostExplicit = explicit
 }
 

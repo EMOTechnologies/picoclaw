@@ -3,7 +3,6 @@ package gateway
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -11,15 +10,19 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/gateway"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/netbind"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 func resolveGatewayHostOverride(explicit bool, host string) (string, error) {
-	host = strings.TrimSpace(host)
-	if explicit && host == "" {
-		return "", fmt.Errorf("the --host option cannot be empty")
+	if !explicit {
+		return "", nil
 	}
-	return host, nil
+	normalized, err := netbind.NormalizeHostInput(host)
+	if err != nil {
+		return "", fmt.Errorf("invalid --host value: %w", err)
+	}
+	return normalized, nil
 }
 
 func NewGatewayCommand() *cobra.Command {

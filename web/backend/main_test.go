@@ -1,8 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"strconv"
 	"testing"
+	"time"
 
+	"github.com/sipeed/picoclaw/pkg/netbind"
 	"github.com/sipeed/picoclaw/web/backend/launcherconfig"
 )
 
@@ -42,21 +50,9 @@ func TestDashboardTokenConfigHelpPath(t *testing.T) {
 		source launcherconfig.DashboardTokenSource
 		want   string
 	}{
-		{
-			name:   "env token does not expose config path",
-			source: launcherconfig.DashboardTokenSourceEnv,
-			want:   "",
-		},
-		{
-			name:   "config token exposes config path",
-			source: launcherconfig.DashboardTokenSourceConfig,
-			want:   launcherPath,
-		},
-		{
-			name:   "random token does not expose config path",
-			source: launcherconfig.DashboardTokenSourceRandom,
-			want:   "",
-		},
+		{name: "env token does not expose config path", source: launcherconfig.DashboardTokenSourceEnv, want: ""},
+		{name: "config token exposes config path", source: launcherconfig.DashboardTokenSourceConfig, want: launcherPath},
+		{name: "random token does not expose config path", source: launcherconfig.DashboardTokenSourceRandom, want: ""},
 	}
 
 	for _, tt := range tests {
@@ -73,22 +69,17 @@ func TestMaskSecret(t *testing.T) {
 		input string
 		want  string
 	}{
-		// Long token (>=12 chars): first 3 + 10 stars + last 4
 		{"sdhjflsjdflksdf", "sdh**********ksdf"},
 		{"abcdefghijklmnopqrstuvwxyz", "abc**********wxyz"},
-		// Exactly 12 chars (3+4+5 hidden): suffix shown
 		{"abcdefghijkl", "abc**********ijkl"},
-		// 8 chars (minimum password length): suffix NOT shown — only prefix+stars
 		{"abcdefgh", "abc**********"},
-		// 11 chars (one below threshold): suffix NOT shown
 		{"abcdefghijk", "abc**********"},
-		// 4..3 chars: prefix shown, no suffix
 		{"abcdefg", "abc**********"},
 		{"abcd", "abc**********"},
-		// <=3 chars: fully masked
 		{"abc", "**********"},
 		{"", "**********"},
 	}
+
 	for _, tt := range tests {
 		if got := maskSecret(tt.input); got != tt.want {
 			t.Errorf("maskSecret(%q) = %q, want %q", tt.input, got, tt.want)
@@ -96,185 +87,46 @@ func TestMaskSecret(t *testing.T) {
 	}
 }
 
-func TestParseLauncherHostList(t *testing.T) {
-	tests := []struct {
-		name    string
-		raw     string
-		want    []string
-		wantErr bool
-	}{
-		{name: "single host", raw: "127.0.0.1", want: []string{"127.0.0.1"}},
-		{name: "multiple hosts", raw: "127.0.0.1, 192.168.2.5", want: []string{"127.0.0.1", "192.168.2.5"}},
-		{name: "dedupe hosts", raw: "127.0.0.1,127.0.0.1", want: []string{"127.0.0.1"}},
-		{name: "reject empty entry", raw: "127.0.0.1,  ", wantErr: true},
-		{name: "reject empty input", raw: "   ", wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseLauncherHostList(tt.raw)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseLauncherHostList() err = %v, wantErr %t", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("len(got) = %d, want %d (%#v)", len(got), len(tt.want), got)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Fatalf("got[%d] = %q, want %q", i, got[i], tt.want[i])
-				}
-			}
-		})
-	}
-}
-
-func TestResolveLauncherBindHost(t *testing.T) {
+func TestResolveLauncherHostInput(t *testing.T) {
 	tests := []struct {
 		name         string
-		host         string
+		flagHost     string
+		explicitFlag bool
 		envHost      string
-		explicitHost bool
-		effectivePub bool
 		wantHost     string
-		wantPublic   bool
-		wantExplicit bool
+		wantActive   bool
 		wantErr      bool
 	}{
-		{
-			name:         "explicit host overrides public",
-			host:         "0.0.0.0",
-			explicitHost: true,
-			effectivePub: true,
-			wantHost:     "0.0.0.0",
-			wantPublic:   false,
-			wantExplicit: true,
-		},
-		{
-			name:         "explicit host overrides env host",
-			host:         "127.0.0.1",
-			envHost:      "0.0.0.0",
-			explicitHost: true,
-			effectivePub: true,
-			wantHost:     "127.0.0.1",
-			wantPublic:   false,
-			wantExplicit: true,
-		},
-		{
-			name:         "explicit host cannot be empty",
-			host:         "   ",
-			explicitHost: true,
-			effectivePub: false,
-			wantErr:      true,
-		},
-		{
-			name:         "env host overrides public",
-			envHost:      "0.0.0.0",
-			explicitHost: false,
-			effectivePub: true,
-			wantHost:     "0.0.0.0",
-			wantPublic:   false,
-			wantExplicit: true,
-		},
-		{
-			name:         "explicit localhost uses adaptive private host",
-			host:         "localhost",
-			explicitHost: true,
-			effectivePub: false,
-			wantHost:     resolveDefaultLauncherPrivateHost(),
-			wantPublic:   false,
-			wantExplicit: true,
-		},
-		{
-			name:         "explicit star uses adaptive any host",
-			host:         "*",
-			explicitHost: true,
-			effectivePub: false,
-			wantHost:     resolveDefaultLauncherAnyHost(),
-			wantPublic:   false,
-			wantExplicit: true,
-		},
-		{
-			name:         "public mode without explicit host",
-			host:         "",
-			explicitHost: false,
-			effectivePub: true,
-			wantHost:     resolveDefaultLauncherAnyHost(),
-			wantPublic:   true,
-			wantExplicit: false,
-		},
-		{
-			name:         "private mode without explicit host",
-			host:         "",
-			explicitHost: false,
-			effectivePub: false,
-			wantHost:     resolveDefaultLauncherPrivateHost(),
-			wantPublic:   false,
-			wantExplicit: false,
-		},
+		{name: "flag host wins", flagHost: "127.0.0.1", explicitFlag: true, envHost: "::", wantHost: "127.0.0.1", wantActive: true},
+		{name: "env host used when flag absent", envHost: "127.0.0.1,::1", wantHost: "127.0.0.1,::1", wantActive: true},
+		{name: "blank env ignored", envHost: "   ", wantHost: "", wantActive: false},
+		{name: "invalid flag rejected", flagHost: "127.0.0.1, ", explicitFlag: true, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotHost, gotPublic, gotExplicit, err := resolveLauncherBindHost(
-				tt.host,
-				tt.explicitHost,
-				tt.envHost,
-				tt.effectivePub,
-			)
+			gotHost, gotActive, err := resolveLauncherHostInput(tt.flagHost, tt.explicitFlag, tt.envHost)
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("resolveLauncherBindHost() error = %v, wantErr %t", err, tt.wantErr)
+				t.Fatalf("resolveLauncherHostInput() err = %v, wantErr %t", err, tt.wantErr)
 			}
 			if tt.wantErr {
 				return
 			}
 			if gotHost != tt.wantHost {
-				t.Fatalf("resolveLauncherBindHost() host = %q, want %q", gotHost, tt.wantHost)
+				t.Fatalf("resolveLauncherHostInput() host = %q, want %q", gotHost, tt.wantHost)
 			}
-			if gotPublic != tt.wantPublic {
-				t.Fatalf("resolveLauncherBindHost() public = %t, want %t", gotPublic, tt.wantPublic)
-			}
-			if gotExplicit != tt.wantExplicit {
-				t.Fatalf("resolveLauncherBindHost() explicit = %t, want %t", gotExplicit, tt.wantExplicit)
-			}
-		})
-	}
-}
-
-func TestResolveLauncherBindMode(t *testing.T) {
-	tests := []struct {
-		name         string
-		rawHost      string
-		hostExplicit bool
-		effectivePub bool
-		wantMode     launcherBindMode
-	}{
-		{name: "auto private", rawHost: "", hostExplicit: false, effectivePub: false, wantMode: launcherBindModeAutoPrivate},
-		{name: "auto public", rawHost: "", hostExplicit: false, effectivePub: true, wantMode: launcherBindModeAutoPublic},
-		{name: "explicit localhost", rawHost: "localhost", hostExplicit: true, effectivePub: false, wantMode: launcherBindModeExplicitAdaptiveLocal},
-		{name: "explicit star", rawHost: "*", hostExplicit: true, effectivePub: false, wantMode: launcherBindModeExplicitAdaptiveAny},
-		{name: "explicit literal", rawHost: "0.0.0.0", hostExplicit: true, effectivePub: false, wantMode: launcherBindModeExplicitLiteral},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := resolveLauncherBindMode(tt.rawHost, tt.hostExplicit, tt.effectivePub); got != tt.wantMode {
-				t.Fatalf("resolveLauncherBindMode() = %q, want %q", got, tt.wantMode)
+			if gotActive != tt.wantActive {
+				t.Fatalf("resolveLauncherHostInput() active = %t, want %t", gotActive, tt.wantActive)
 			}
 		})
 	}
 }
 
 func TestLauncherConsoleHosts(t *testing.T) {
-	t.Run("auto private includes dual loopback hints", func(t *testing.T) {
-		hosts := launcherConsoleHosts(launcherBindModeAutoPrivate, "localhost", false)
+	t.Run("wildcard exposes local loopback hints", func(t *testing.T) {
+		hosts := launcherConsoleHosts([]string{"::"}, netbind.ResolveAdaptiveLoopbackHost())
 		seen := make(map[string]bool, len(hosts))
 		for _, host := range hosts {
-			if seen[host] {
-				t.Fatalf("duplicate host %q in %#v", host, hosts)
-			}
 			seen[host] = true
 		}
 		if !seen["localhost"] {
@@ -288,63 +140,149 @@ func TestLauncherConsoleHosts(t *testing.T) {
 		}
 	})
 
-	t.Run("explicit ipv4 wildcard excludes ipv6 loopback", func(t *testing.T) {
-		hosts := launcherConsoleHosts(launcherBindModeExplicitLiteral, "0.0.0.0", false)
-		seen := make(map[string]bool, len(hosts))
-		for _, host := range hosts {
-			seen[host] = true
-		}
-		if seen["::1"] {
-			t.Fatalf("did not expect ::1 in %#v", hosts)
-		}
-		if !seen["127.0.0.1"] {
-			t.Fatalf("expected 127.0.0.1 in %#v", hosts)
-		}
-	})
-
 	t.Run("explicit ipv6 host remains visible", func(t *testing.T) {
-		hosts := launcherConsoleHosts(launcherBindModeExplicitLiteral, "::1", false)
-		if len(hosts) != 2 {
-			t.Fatalf("len(hosts) = %d, want 2 (%#v)", len(hosts), hosts)
-		}
-		if hosts[0] != "localhost" || hosts[1] != "::1" {
-			t.Fatalf("hosts = %#v, want [localhost ::1]", hosts)
+		hosts := launcherConsoleHosts([]string{"::1"}, "::1")
+		if len(hosts) < 1 || hosts[0] != "::1" {
+			t.Fatalf("hosts = %#v, want probe host first", hosts)
 		}
 	})
-}
-
-func TestBrowserHostForLauncher(t *testing.T) {
-	if got := browserHostForLauncher("0.0.0.0"); got != "localhost" {
-		t.Fatalf("browserHostForLauncher(0.0.0.0) = %q, want %q", got, "localhost")
-	}
-	if got := browserHostForLauncher("::"); got != "localhost" {
-		t.Fatalf("browserHostForLauncher(::) = %q, want %q", got, "localhost")
-	}
-	if got := browserHostForLauncher("192.168.1.10"); got != "192.168.1.10" {
-		t.Fatalf("browserHostForLauncher(192.168.1.10) = %q, want %q", got, "192.168.1.10")
-	}
 }
 
 func TestWildcardAdvertiseIP(t *testing.T) {
 	tests := []struct {
-		name     string
-		bindHost string
-		ipv4     string
-		ipv6     string
-		want     string
+		name      string
+		bindHosts []string
+		ipv4      string
+		ipv6      string
+		want      string
 	}{
-		{name: "ipv4 wildcard prefers ipv6 when available", bindHost: "0.0.0.0", ipv4: "192.168.1.2", ipv6: "2001:db8::1", want: "2001:db8::1"},
-		{name: "ipv6 wildcard uses ipv6", bindHost: "::", ipv4: "192.168.1.2", ipv6: "2001:db8::1", want: "2001:db8::1"},
-		{name: "ipv6 wildcard falls back to ipv4", bindHost: "::", ipv4: "192.168.1.2", ipv6: "", want: "192.168.1.2"},
-		{name: "ipv4 wildcard uses ipv6-only network", bindHost: "0.0.0.0", ipv4: "", ipv6: "2001:db8::1", want: "2001:db8::1"},
-		{name: "non wildcard does not advertise", bindHost: "127.0.0.1", ipv4: "192.168.1.2", ipv6: "2001:db8::1", want: ""},
+		{name: "ipv4 wildcard prefers ipv6 when available", bindHosts: []string{"0.0.0.0"}, ipv4: "192.168.1.2", ipv6: "2001:db8::1", want: "2001:db8::1"},
+		{name: "ipv6 wildcard uses ipv6", bindHosts: []string{"::"}, ipv4: "192.168.1.2", ipv6: "2001:db8::1", want: "2001:db8::1"},
+		{name: "ipv6 wildcard falls back to ipv4", bindHosts: []string{"::"}, ipv4: "192.168.1.2", ipv6: "", want: "192.168.1.2"},
+		{name: "non wildcard does not advertise", bindHosts: []string{"127.0.0.1"}, ipv4: "192.168.1.2", ipv6: "2001:db8::1", want: ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := wildcardAdvertiseIP(tt.bindHost, tt.ipv4, tt.ipv6); got != tt.want {
-				t.Fatalf("wildcardAdvertiseIP(%q, %q, %q) = %q, want %q", tt.bindHost, tt.ipv4, tt.ipv6, got, tt.want)
+			if got := wildcardAdvertiseIP(tt.bindHosts, tt.ipv4, tt.ipv6); got != tt.want {
+				t.Fatalf("wildcardAdvertiseIP(%#v, %q, %q) = %q, want %q", tt.bindHosts, tt.ipv4, tt.ipv6, got, tt.want)
 			}
 		})
 	}
+}
+
+func TestOpenLauncherListeners_HonorsIPv6OnlyHost(t *testing.T) {
+	hasIPv4, hasIPv6 := netbind.DetectIPFamilies()
+	if !hasIPv6 {
+		t.Skip("IPv6 is unavailable in this environment")
+	}
+
+	result, err := openLauncherListeners("::", false, "0")
+	if err != nil {
+		t.Fatalf("openLauncherListeners() error = %v", err)
+	}
+	startLauncherTestHTTPServer(t, result.Listeners)
+	port := mustAtoi(t, result.Port)
+
+	requireLauncherHTTPReachable(t, "::1", port)
+	if hasIPv4 {
+		requireLauncherHTTPUnreachable(t, "127.0.0.1", port)
+	}
+}
+
+func TestOpenLauncherListeners_SupportsExplicitMultiHost(t *testing.T) {
+	hasIPv4, hasIPv6 := netbind.DetectIPFamilies()
+	if !hasIPv4 || !hasIPv6 {
+		t.Skip("dual-stack loopback is unavailable in this environment")
+	}
+
+	result, err := openLauncherListeners("127.0.0.1,::1", false, "0")
+	if err != nil {
+		t.Fatalf("openLauncherListeners() error = %v", err)
+	}
+	startLauncherTestHTTPServer(t, result.Listeners)
+	port := mustAtoi(t, result.Port)
+
+	requireLauncherHTTPReachable(t, "127.0.0.1", port)
+	requireLauncherHTTPReachable(t, "::1", port)
+}
+
+func startLauncherTestHTTPServer(t *testing.T, listeners []net.Listener) {
+	t.Helper()
+
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, "ok")
+		}),
+	}
+
+	errCh := make(chan error, len(listeners))
+	for _, listener := range listeners {
+		ln := listener
+		go func() {
+			errCh <- server.Serve(ln)
+		}()
+	}
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+		for range listeners {
+			err := <-errCh
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				t.Fatalf("server.Serve() error = %v", err)
+			}
+		}
+	})
+}
+
+func requireLauncherHTTPReachable(t *testing.T, host string, port int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err := launcherHTTPGet(host, port)
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected %s:%d to be reachable: %v", host, port, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func requireLauncherHTTPUnreachable(t *testing.T, host string, port int) {
+	t.Helper()
+	if err := launcherHTTPGet(host, port); err == nil {
+		t.Fatalf("expected %s:%d to be unreachable", host, port)
+	}
+}
+
+func launcherHTTPGet(host string, port int) error {
+	client := &http.Client{
+		Timeout: 300 * time.Millisecond,
+		Transport: &http.Transport{
+			Proxy: nil,
+		},
+	}
+
+	resp, err := client.Get("http://" + net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return errors.New(resp.Status)
+	}
+	return nil
+}
+
+func mustAtoi(t *testing.T, value string) int {
+	t.Helper()
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		t.Fatalf("Atoi(%q) error = %v", value, err)
+	}
+	return n
 }

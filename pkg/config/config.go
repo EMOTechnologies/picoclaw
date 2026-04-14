@@ -1082,7 +1082,10 @@ func LoadConfig(path string) (*Config, error) {
 	if err = InitChannelList(cfg.Channels); err != nil {
 		return nil, err
 	}
-	cfg.Gateway.Host = resolveGatewayHostFromEnv(gatewayHostBeforeEnv)
+	cfg.Gateway.Host, err = resolveGatewayHostFromEnv(gatewayHostBeforeEnv)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gateway host: %w", err)
+	}
 
 	// Expand multi-key configs into separate entries for key-level failover
 	cfg.ModelList = expandMultiKeyModels(cfg.ModelList)

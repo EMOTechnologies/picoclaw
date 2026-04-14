@@ -43,6 +43,7 @@ func TestResolveGatewayHostOverride(t *testing.T) {
 		{name: "implicit empty host is allowed", explicit: false, host: "", wantHost: "", wantErr: false},
 		{name: "explicit empty host rejected", explicit: true, host: "   ", wantHost: "", wantErr: true},
 		{name: "explicit localhost kept", explicit: true, host: " localhost ", wantHost: "localhost", wantErr: false},
+		{name: "explicit multi host normalized", explicit: true, host: " [::1] , 127.0.0.1 ", wantHost: "::1,127.0.0.1", wantErr: false},
 	}
 
 	for _, tt := range tests {
