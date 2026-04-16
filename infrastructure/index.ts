@@ -6,10 +6,11 @@ const gcpConfig = new pulumi.Config("gcp");
 
 const project = gcpConfig.require("project");
 const region = config.get("region") ?? "asia-southeast1";
+const imageRegion = config.get("imageRegion") ?? "europe-west4";
 const imageTag = config.get("imageTag") ?? "latest";
 const imageName = config.get("imageName") ?? "picoclaw";
 
-const PICOCLAW_IMAGE = pulumi.interpolate`${region}-docker.pkg.dev/enterprise-automation-352103/container-repo/${imageName}:${imageTag}`;
+const PICOCLAW_IMAGE = pulumi.interpolate`${imageRegion}-docker.pkg.dev/enterprise-automation-352103/container-repo/${imageName}:${imageTag}`;
 
 // ─────────────────────────────────────────────
 // Look up pre-existing secrets in Secret Manager
@@ -62,14 +63,14 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
     template: {
         serviceAccount: gatewayServiceAccount.email,
         scaling: {
-            minInstanceCount: 1,
+            minInstanceCount: 0,
             maxInstanceCount: 3,
         },
         containers: [
             {
                 image: PICOCLAW_IMAGE,
                 ports: {
-                    containerPort: 18790,
+                    containerPort: 18800,
                 },
                 envs: [
                     { name: "PICOCLAW_GATEWAY_HOST", value: "0.0.0.0" },
@@ -126,23 +127,23 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
                     },
                     cpuIdle: false,
                 },
-                startupProbe: {
-                    httpGet: {
-                        path: "/health",
-                        port: 18790,
-                    },
-                    initialDelaySeconds: 5,
-                    periodSeconds: 10,
-                    failureThreshold: 6,
-                },
-                livenessProbe: {
-                    httpGet: {
-                        path: "/health",
-                        port: 18790,
-                    },
-                    periodSeconds: 30,
-                    failureThreshold: 3,
-                },
+                // startupProbe: {
+                //     httpGet: {
+                //         path: "/health",
+                //         port: 18790,
+                //     },
+                //     initialDelaySeconds: 5,
+                //     periodSeconds: 10,
+                //     failureThreshold: 6,
+                // },
+                // livenessProbe: {
+                //     httpGet: {
+                //         path: "/health",
+                //         port: 18790,
+                //     },
+                //     periodSeconds: 30,
+                //     failureThreshold: 3,
+                // },
             },
         ],
     },
@@ -150,17 +151,25 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
     dependsOn: [iamSecretAccessor],
 });
 
-// Grant invoker access only to authenticated members of the current project
-new gcp.cloudrunv2.ServiceIamBinding("picoclaw-gateway-invoker", {
+// Temporarily disable access filtering and allow unauthenticated access.
+// Previous filtered access logic:
+// const runInvokerMembers =
+//     config.get("runInvokerMembers")?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
+// runInvokerMembers.forEach((member, i) => {
+//     new gcp.cloudrunv2.ServiceIamMember(`picoclaw-gateway-invoker-${i}`, {
+//         project,
+//         location: region,
+//         name: gatewayService.name,
+//         role: "roles/run.invoker",
+//         member,
+//     });
+// });
+new gcp.cloudrunv2.ServiceIamMember("picoclaw-gateway-public-invoker", {
     project,
     location: region,
     name: gatewayService.name,
     role: "roles/run.invoker",
-    members: [
-        `projectOwner:${project}`,
-        `projectEditor:${project}`,
-        `projectViewer:${project}`,
-    ],
+    member: "allUsers",
 });
 
 export const serviceUrl = gatewayService.uri;
