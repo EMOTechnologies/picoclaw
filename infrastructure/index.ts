@@ -125,7 +125,7 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
                         cpu: "1",
                         memory: "512Mi",
                     },
-                    cpuIdle: false,
+                    cpuIdle: true,
                 },
                 // startupProbe: {
                 //     httpGet: {
