@@ -91,6 +91,9 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
                 },
                 envs: [
                     { name: "PICOCLAW_GATEWAY_HOST", value: "0.0.0.0" },
+                    // Chromium memory optimization flags
+                    { name: "CHROME_FLAGS", value: "--disable-dev-shm-usage --no-sandbox --disable-setuid-sandbox --disable-gpu --disable-software-rasterizer --disable-extensions --disable-background-networking --disable-sync --disable-translate --disable-breakpad --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --metrics-recording-only --mute-audio" },
+                    { name: "PLAYWRIGHT_CHROMIUM_USE_HEADLESS_NEW", value: "1" },
                     {
                         name: "AWS_ACCESS_KEY_ID",
                         valueSource: {
@@ -139,8 +142,8 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
                 ],
                 resources: {
                     limits: {
-                        cpu: "1",
-                        memory: "1024Mi",
+                        cpu: "2",
+                        memory: "2048Mi",  // Increased for Chromium browser automation
                     },
                     cpuIdle: true,
                 },

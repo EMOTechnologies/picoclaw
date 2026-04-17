@@ -24,7 +24,8 @@
     { "key": "skill_name",     "value": "",                       "type": "string" },
     { "key": "oauth_flow_id",  "value": "",                       "type": "string" },
     { "key": "weixin_flow_id", "value": "",                       "type": "string" },
-    { "key": "wecom_flow_id",  "value": "",                       "type": "string" }
+    { "key": "wecom_flow_id",  "value": "",                       "type": "string" },
+    { "key": "webhook_job_id", "value": "",                       "type": "string" }
   ],
   "item": [
     {
@@ -700,6 +701,94 @@
             "method": "GET",
             "url": "{{base_url}}/api/wecom/flows/{{wecom_flow_id}}",
             "description": "Poll every 2-3 seconds. On confirmed, WeCom bot credentials saved and gateway restarted."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhook",
+      "description": "Asynchronous webhook processing. Submit jobs that run in the background and POST results to your webhook URL.",
+      "item": [
+        {
+          "name": "Submit Processing Job",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('webhook_job_id', response.job_id);",
+                  "    console.log('Job ID saved:', response.job_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/webhook/process",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"webhook_url\": \"https://webhook.site/your-unique-id\",\n  \"payload\": {\n    \"data\": \"your data here\",\n    \"priority\": \"high\",\n    \"timestamp\": \"{{$isoTimestamp}}\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Submit an async job. Returns 202 Accepted with job_id. Job runs in background and results are POSTed to webhook_url.\n\nTest with webhook.site:\n1. Visit https://webhook.site\n2. Copy your unique URL\n3. Replace webhook_url above\n4. Send request\n5. Watch callback arrive at webhook.site\n\nResponse: {job_id, status: \"processing\", timestamp}\n\nWebhook receives: {job_id, status: \"completed\"|\"failed\", result: {...}|error: \"...\", timestamp}"
+          }
+        },
+        {
+          "name": "Get Job Status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/webhook/status?job_id={{webhook_job_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "webhook", "status"],
+              "query": [
+                {
+                  "key": "job_id",
+                  "value": "{{webhook_job_id}}",
+                  "description": "Job UUID from POST /api/webhook/process response"
+                }
+              ]
+            },
+            "description": "Query job status by job_id. Jobs are retained for 2 hours.\n\nResponse:\n{\n  \"ID\": \"uuid\",\n  \"WebhookURL\": \"https://...\",\n  \"Payload\": {...},\n  \"Status\": \"processing\"|\"completed\"|\"failed\",\n  \"CreatedAt\": \"2026-04-17T10:00:00Z\",\n  \"CompletedAt\": \"2026-04-17T10:00:05Z\" (nullable)\n}"
+          }
+        },
+        {
+          "name": "Submit Job - Example 1 (Simple)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/webhook/process",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"webhook_url\": \"https://webhook.site/test\",\n  \"payload\": {\n    \"message\": \"Hello, World!\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Simple example with minimal payload."
+          }
+        },
+        {
+          "name": "Submit Job - Example 2 (Complex)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/webhook/process",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"webhook_url\": \"https://your-app.com/webhook/callback\",\n  \"payload\": {\n    \"task\": \"process_document\",\n    \"document\": {\n      \"url\": \"https://example.com/document.pdf\",\n      \"pages\": [1, 2, 3]\n    },\n    \"options\": {\n      \"extract_tables\": true,\n      \"ocr\": true\n    },\n    \"metadata\": {\n      \"user_id\": \"12345\",\n      \"request_id\": \"req_{{$randomUUID}}\"\n    }\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Complex example with nested payload structure."
           }
         }
       ]

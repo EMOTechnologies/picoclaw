@@ -127,3 +127,72 @@ Always close sessions when done:
 agent-browser close
 agent-browser --session s1 close
 ```
+
+## Memory Optimization
+
+Browser automation consumes significant memory (200-800MB per session). Follow these practices to minimize memory usage:
+
+### 1. Close Browser After Each Task
+```bash
+# ✅ Good: Close when done
+agent-browser open https://example.com
+agent-browser snapshot -i
+agent-browser close
+
+# ❌ Bad: Leaving browser open
+agent-browser open https://example.com
+# ... browser stays open, consuming memory
+```
+
+### 2. Reuse Browser Sessions
+Instead of opening/closing frequently, keep one session and navigate:
+```bash
+# ✅ Good: Reuse session
+agent-browser open https://site-a.com
+agent-browser snapshot -i
+# Do work...
+agent-browser open https://site-b.com  # Reuses same browser
+agent-browser close  # Close when all done
+
+# ❌ Bad: Multiple open/close cycles
+agent-browser open https://site-a.com && agent-browser close
+agent-browser open https://site-b.com && agent-browser close
+```
+
+### 3. Avoid Unnecessary Screenshots
+Full-page screenshots consume extra memory during rendering:
+```bash
+# ✅ Use snapshot for element inspection (lighter)
+agent-browser snapshot -i
+
+# ⚠️ Use screenshots only when visual output is needed
+agent-browser screenshot --full
+```
+
+### 4. Chain Commands to Reduce Context Switches
+```bash
+# ✅ Good: Single command chain
+agent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser snapshot -i && agent-browser close
+
+# ❌ Bad: Multiple separate commands
+agent-browser open https://example.com
+agent-browser wait --load networkidle
+agent-browser snapshot -i
+agent-browser close
+```
+
+### 5. Limit Parallel Sessions
+```bash
+# ⚠️ Each session = 200-400MB memory
+agent-browser --session s1 open https://site-a.com  # +300MB
+agent-browser --session s2 open https://site-b.com  # +300MB
+agent-browser --session s3 open https://site-c.com  # +300MB (900MB total!)
+
+# ✅ Better: Use one session, navigate sequentially
+agent-browser open https://site-a.com
+# ... work
+agent-browser open https://site-b.com
+# ... work
+agent-browser close
+```
+
