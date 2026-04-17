@@ -140,7 +140,7 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
                 resources: {
                     limits: {
                         cpu: "1",
-                        memory: "512Mi",
+                        memory: "1024Mi",
                     },
                     cpuIdle: true,
                 },
