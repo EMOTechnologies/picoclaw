@@ -4,9 +4,8 @@ set -e
 # OpenVPN startup script for Cloud Run
 # This establishes VPN connection before starting the application
 
-VPN_CONFIG_DIR="/etc/openvpn"
-VPN_CONFIG="${VPN_CONFIG_DIR}/client.ovpn"
-VPN_AUTH="${VPN_CONFIG_DIR}/auth.txt"
+VPN_CONFIG="/etc/openvpn-config/client.ovpn"
+VPN_AUTH="/etc/openvpn-auth/auth.txt"
 
 # Check if VPN credentials are provided
 if [ ! -f "${VPN_CONFIG}" ]; then

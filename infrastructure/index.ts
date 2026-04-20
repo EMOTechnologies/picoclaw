@@ -166,13 +166,11 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
                     },
                     {
                         name: "vpn-config",
-                        mountPath: "/etc/openvpn/client.ovpn",
-                        subPath: "client.ovpn",
+                        mountPath: "/etc/openvpn-config",
                     },
                     {
                         name: "vpn-auth",
-                        mountPath: "/etc/openvpn/auth.txt",
-                        subPath: "auth.txt",
+                        mountPath: "/etc/openvpn-auth",
                     },
                 ],
                 // startupProbe: {
