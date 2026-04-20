@@ -52,5 +52,5 @@ done
 # Verify connectivity through VPN (optional DNS test)
 echo "VPN connection established. Starting application..."
 
-# Now run the original entrypoint
-exec /entrypoint.sh "$@"
+# Now run picoclaw-launcher with passed arguments
+exec picoclaw-launcher "$@"
