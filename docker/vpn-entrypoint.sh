@@ -4,21 +4,32 @@ set -e
 # OpenVPN startup script for Cloud Run
 # This establishes VPN connection before starting the application
 
-VPN_CONFIG="/etc/openvpn-config/client.ovpn"
-VPN_AUTH="/etc/openvpn-auth/auth.txt"
+VPN_CONFIG_SOURCE="/etc/openvpn-config/client.ovpn"
+VPN_AUTH_SOURCE="/etc/openvpn-auth/auth.txt"
+
+# Writable directory for OpenVPN
+VPN_WORK_DIR="/tmp/openvpn"
+VPN_CONFIG="${VPN_WORK_DIR}/client.ovpn"
+VPN_AUTH="${VPN_WORK_DIR}/auth.txt"
 
 # Check if VPN credentials are provided
-if [ ! -f "${VPN_CONFIG}" ]; then
-    echo "ERROR: OpenVPN config not found at ${VPN_CONFIG}"
-    echo "Mount client.ovpn to ${VPN_CONFIG}"
+if [ ! -f "${VPN_CONFIG_SOURCE}" ]; then
+    echo "ERROR: OpenVPN config not found at ${VPN_CONFIG_SOURCE}"
+    echo "Mount client.ovpn to ${VPN_CONFIG_SOURCE}"
     exit 1
 fi
 
-if [ ! -f "${VPN_AUTH}" ]; then
-    echo "ERROR: OpenVPN auth not found at ${VPN_AUTH}"
-    echo "Mount auth.txt to ${VPN_AUTH}"
+if [ ! -f "${VPN_AUTH_SOURCE}" ]; then
+    echo "ERROR: OpenVPN auth not found at ${VPN_AUTH_SOURCE}"
+    echo "Mount auth.txt to ${VPN_AUTH_SOURCE}"
     exit 1
 fi
+
+# Create working directory and copy files (secrets are read-only)
+mkdir -p "${VPN_WORK_DIR}"
+cp "${VPN_CONFIG_SOURCE}" "${VPN_CONFIG}"
+cp "${VPN_AUTH_SOURCE}" "${VPN_AUTH}"
+chmod 600 "${VPN_CONFIG}" "${VPN_AUTH}"
 
 # Update config to use auth file
 if ! grep -q "auth-user-pass ${VPN_AUTH}" "${VPN_CONFIG}"; then
