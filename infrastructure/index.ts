@@ -10,6 +10,7 @@ const imageRegion = config.get("imageRegion") ?? "europe-west4";
 const imageTag = config.get("imageTag") ?? "latest";
 const imageName = config.get("imageName") ?? "picoclaw";
 
+// NOTE: Build image with OpenVPN support using: docker build -f docker/Dockerfile.cloudrun
 const PICOCLAW_IMAGE = pulumi.interpolate`${imageRegion}-docker.pkg.dev/enterprise-automation-352103/container-repo/${imageName}:${imageTag}`;
 
 // ─────────────────────────────────────────────
@@ -33,6 +34,16 @@ const awsRegionNameSecret = gcp.secretmanager.Secret.get(
 const launcherTokenSecret = gcp.secretmanager.Secret.get(
     "picoclaw-launcher-token",
     `projects/${project}/secrets/PICOCLAW_LAUNCHER_TOKEN`,
+);
+
+const vpnConfigSecret = gcp.secretmanager.Secret.get(
+    "picoclaw-openvpn-config",
+    `projects/${project}/secrets/PICOCLAW_OPENVPN_CONFIG`,
+);
+
+const vpnAuthSecret = gcp.secretmanager.Secret.get(
+    "picoclaw-openvpn-auth",
+    `projects/${project}/secrets/PICOCLAW_OPENVPN_AUTH`,
 );
 
 // ─────────────────────────────────────────────
@@ -83,6 +94,7 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
             minInstanceCount: 0,
             maxInstanceCount: 3,
         },
+        executionEnvironment: "EXECUTION_ENVIRONMENT_GEN2",
         containers: [
             {
                 image: PICOCLAW_IMAGE,
@@ -152,6 +164,16 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
                         name: "picoclaw-home",
                         mountPath: "/root/.picoclaw",
                     },
+                    {
+                        name: "vpn-config",
+                        mountPath: "/etc/openvpn/client.ovpn",
+                        subPath: "client.ovpn",
+                    },
+                    {
+                        name: "vpn-auth",
+                        mountPath: "/etc/openvpn/auth.txt",
+                        subPath: "auth.txt",
+                    },
                 ],
                 // startupProbe: {
                 //     httpGet: {
@@ -178,6 +200,32 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
                 gcs: {
                     bucket: picoclawStateBucket.name,
                     readOnly: false,
+                },
+            },
+            {
+                name: "vpn-config",
+                secret: {
+                    secret: vpnConfigSecret.secretId,
+                    defaultMode: 0o400,
+                    items: [
+                        {
+                            path: "client.ovpn",
+                            version: "latest",
+                        },
+                    ],
+                },
+            },
+            {
+                name: "vpn-auth",
+                secret: {
+                    secret: vpnAuthSecret.secretId,
+                    defaultMode: 0o400,
+                    items: [
+                        {
+                            path: "auth.txt",
+                            version: "latest",
+                        },
+                    ],
                 },
             },
         ],
