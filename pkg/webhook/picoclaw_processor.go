@@ -84,17 +84,33 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt string) (string, e
 	logger.DebugC("webhook", fmt.Sprintf("Sent prompt to PicoClaw: %s", prompt))
 
 	// Read responses until we get a complete answer
-	// The Pico protocol sends message.create for responses, and may stream them
+	// The Pico protocol streams responses as multiple message.create messages
 	var fullResponse string
-	responseTimeout := 3 * time.Second // Wait up to 3 seconds after last message
-	lastMessageTime := time.Now()
+	var messageCount int
+	idleTimeout := 2 * time.Second  // Wait 2 seconds after last chunk
+	maxWaitTime := 5 * time.Minute  // Maximum total wait time
+	startTime := time.Now()
 
 	for {
-		// Set a read deadline to detect when no more messages are coming
-		conn.SetReadDeadline(time.Now().Add(responseTimeout))
+		// Check overall timeout
+		if time.Since(startTime) > maxWaitTime {
+			if fullResponse != "" {
+				logger.InfoC("webhook", fmt.Sprintf("Max wait time reached, returning collected response (%d messages)", messageCount))
+				return fullResponse, nil
+			}
+			return "", fmt.Errorf("no response received within maximum wait time")
+		}
+
+		// Set a read deadline to detect when stream is complete
+		// This resets with each iteration, so as long as messages keep coming, we continue
+		conn.SetReadDeadline(time.Now().Add(idleTimeout))
 
 		select {
 		case <-ctx.Done():
+			if fullResponse != "" {
+				logger.InfoC("webhook", "Context cancelled, returning partial response")
+				return fullResponse, nil
+			}
 			return "", ctx.Err()
 		default:
 		}
@@ -103,29 +119,27 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt string) (string, e
 		err := conn.ReadJSON(&msg)
 
 		if err != nil {
-			// Check if this is a timeout (means response is complete)
+			// Check if this is a timeout (means stream is complete)
 			if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
-				// Timeout means no more messages coming
 				if fullResponse != "" {
-					logger.DebugC("webhook", fmt.Sprintf("Response complete (timeout), length: %d", len(fullResponse)))
+					logger.InfoC("webhook", fmt.Sprintf("Stream complete: received %d message chunks, total length: %d", messageCount, len(fullResponse)))
 					return fullResponse, nil
 				}
-				// Still waiting for first response
-				if time.Since(lastMessageTime) > 30*time.Second {
-					return "", fmt.Errorf("no response received within timeout")
-				}
+				// No response yet, keep waiting
 				continue
 			}
 
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				if fullResponse != "" {
+					logger.InfoC("webhook", fmt.Sprintf("Connection closed, returning response (%d messages)", messageCount))
+					return fullResponse, nil
+				}
 				break
 			}
 			return "", fmt.Errorf("failed to read response: %w", err)
 		}
 
-		lastMessageTime = time.Now()
 		msgType, _ := msg["type"].(string)
-		logger.DebugC("webhook", fmt.Sprintf("Received message type: %s", msgType))
 
 		switch msgType {
 		case "message.create":
@@ -133,17 +147,21 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt string) (string, e
 			if payload, ok := msg["payload"].(map[string]interface{}); ok {
 				// Check if this is a thought message (skip it)
 				if thought, ok := payload["thought"].(bool); ok && thought {
-					logger.DebugC("webhook", "Skipping thought message")
+					logger.DebugC("webhook", "Received thought message (skipping)")
 					continue
 				}
 
-				if content, ok := payload["content"].(string); ok {
+				if content, ok := payload["content"].(string); ok && content != "" {
+					messageCount++
 					fullResponse += content
-					logger.DebugC("webhook", fmt.Sprintf("Accumulated response length: %d", len(fullResponse)))
+					logger.DebugC("webhook", fmt.Sprintf("Chunk %d: +%d chars (total: %d)", messageCount, len(content), len(fullResponse)))
 				}
 			}
-		case "typing.start", "typing.stop":
-			// Skip typing indicators
+		case "typing.start":
+			logger.DebugC("webhook", "AI started typing")
+			continue
+		case "typing.stop":
+			logger.DebugC("webhook", "AI stopped typing")
 			continue
 		case "error":
 			// Extract error from payload
@@ -155,11 +173,12 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt string) (string, e
 					errorMsg = code
 				}
 			}
-			logger.ErrorC("webhook", fmt.Sprintf("AI returned error: %s, full message: %+v", errorMsg, msg))
+			logger.ErrorC("webhook", fmt.Sprintf("AI returned error: %s", errorMsg))
 			return "", fmt.Errorf("AI error: %s", errorMsg)
 		case "pong":
-			// Skip pong messages
 			continue
+		default:
+			logger.DebugC("webhook", fmt.Sprintf("Received unknown message type: %s", msgType))
 		}
 	}
 
