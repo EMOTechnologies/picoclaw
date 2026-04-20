@@ -80,179 +80,177 @@ const stateBucketObjectAdmin = new gcp.storage.BucketIAMMember("picoclaw-sa-stat
     member: pulumi.interpolate`serviceAccount:${gatewayServiceAccount.email}`,
 });
 
-// ─────────────────────────────────────────────
-// Cloud Run v2 service — picoclaw gateway
-// ─────────────────────────────────────────────
-const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
-    name: "picoclaw-gateway",
-    location: region,
+const artifactRegistryReader = new gcp.projects.IAMMember("picoclaw-sa-artifact-registry-reader", {
     project,
-    ingress: "INGRESS_TRAFFIC_ALL",
-    template: {
-        serviceAccount: gatewayServiceAccount.email,
-        scaling: {
-            minInstanceCount: 0,
-            maxInstanceCount: 3,
+    role: "roles/artifactregistry.reader",
+    member: pulumi.interpolate`serviceAccount:${gatewayServiceAccount.email}`,
+});
+
+// ─────────────────────────────────────────────
+// Firewall rule to allow traffic to picoclaw gateway
+// ─────────────────────────────────────────────
+const gatewayFirewall = new gcp.compute.Firewall("picoclaw-gateway-firewall", {
+    project,
+    network: "default",
+    allows: [
+        {
+            protocol: "tcp",
+            ports: ["18800"],
         },
-        executionEnvironment: "EXECUTION_ENVIRONMENT_GEN2",
-        containers: [
-            {
-                image: PICOCLAW_IMAGE,
-                ports: {
-                    containerPort: 18800,
-                },
-                envs: [
-                    { name: "PICOCLAW_GATEWAY_HOST", value: "0.0.0.0" },
-                    // Chromium memory optimization flags
-                    { name: "CHROME_FLAGS", value: "--disable-dev-shm-usage --no-sandbox --disable-setuid-sandbox --disable-gpu --disable-software-rasterizer --disable-extensions --disable-background-networking --disable-sync --disable-translate --disable-breakpad --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --metrics-recording-only --mute-audio" },
-                    { name: "PLAYWRIGHT_CHROMIUM_USE_HEADLESS_NEW", value: "1" },
-                    {
-                        name: "AWS_ACCESS_KEY_ID",
-                        valueSource: {
-                            secretKeyRef: {
-                                secret: awsAccessKeySecret.secretId,
-                                version: "latest",
-                            },
-                        },
-                    },
-                    {
-                        name: "AWS_SECRET_ACCESS_KEY",
-                        valueSource: {
-                            secretKeyRef: {
-                                secret: awsSecretKeySecret.secretId,
-                                version: "latest",
-                            },
-                        },
-                    },
-                    {
-                        name: "AWS_REGION",
-                        valueSource: {
-                            secretKeyRef: {
-                                secret: awsRegionNameSecret.secretId,
-                                version: "latest",
-                            },
-                        },
-                    },
-                    {
-                        name: "AWS_DEFAULT_REGION",
-                        valueSource: {
-                            secretKeyRef: {
-                                secret: awsRegionNameSecret.secretId,
-                                version: "latest",
-                            },
-                        },
-                    },
-                    {
-                        name: "PICOCLAW_LAUNCHER_TOKEN",
-                        valueSource: {
-                            secretKeyRef: {
-                                secret: launcherTokenSecret.secretId,
-                                version: "latest",
-                            },
-                        },
-                    },
-                ],
-                resources: {
-                    limits: {
-                        cpu: "2",
-                        memory: "2048Mi",  // Increased for Chromium browser automation
-                    },
-                    cpuIdle: true,
-                },
-                volumeMounts: [
-                    {
-                        name: "picoclaw-home",
-                        mountPath: "/root/.picoclaw",
-                    },
-                    {
-                        name: "vpn-config",
-                        mountPath: "/etc/openvpn-config",
-                    },
-                    {
-                        name: "vpn-auth",
-                        mountPath: "/etc/openvpn-auth",
-                    },
-                ],
-                // startupProbe: {
-                //     httpGet: {
-                //         path: "/health",
-                //         port: 18790,
-                //     },
-                //     initialDelaySeconds: 5,
-                //     periodSeconds: 10,
-                //     failureThreshold: 6,
-                // },
-                // livenessProbe: {
-                //     httpGet: {
-                //         path: "/health",
-                //         port: 18790,
-                //     },
-                //     periodSeconds: 30,
-                //     failureThreshold: 3,
-                // },
-            },
-        ],
-        volumes: [
-            {
-                name: "picoclaw-home",
-                gcs: {
-                    bucket: picoclawStateBucket.name,
-                    readOnly: false,
-                },
-            },
-            {
-                name: "vpn-config",
-                secret: {
-                    secret: vpnConfigSecret.secretId,
-                    defaultMode: 0o400,
-                    items: [
+    ],
+    sourceRanges: ["0.0.0.0/0"],
+    targetTags: ["picoclaw-gateway"],
+});
+
+// ─────────────────────────────────────────────
+// Compute Engine VM — picoclaw gateway
+// ─────────────────────────────────────────────
+const gatewayInstance = new gcp.compute.Instance("picoclaw-gateway", {
+    project,
+    zone: `${region}-a`,
+    machineType: "n2-standard-2", // 2 vCPUs, 8GB RAM
+    tags: ["picoclaw-gateway"],
+    serviceAccount: {
+        email: gatewayServiceAccount.email,
+        scopes: ["cloud-platform"],
+    },
+    bootDisk: {
+        initializeParams: {
+            image: "cos-cloud/cos-stable", // Container-Optimized OS
+            size: 30, // GB
+        },
+    },
+    networkInterfaces: [
+        {
+            network: "default",
+            accessConfigs: [{}], // Ephemeral external IP
+        },
+    ],
+    metadata: {
+        "gce-container-declaration": PICOCLAW_IMAGE.apply(image =>
+            JSON.stringify({
+                spec: {
+                    containers: [
                         {
-                            path: "client.ovpn",
-                            version: "latest",
+                            name: "picoclaw-gateway",
+                            image,
+                            ports: [
+                                {
+                                    containerPort: 18800,
+                                    hostPort: 18800,
+                                    protocol: "TCP",
+                                },
+                            ],
+                            env: [
+                                { name: "PICOCLAW_GATEWAY_HOST", value: "0.0.0.0" },
+                                { name: "CHROME_FLAGS", value: "--disable-dev-shm-usage --no-sandbox --disable-setuid-sandbox --disable-gpu --disable-software-rasterizer --disable-extensions --disable-background-networking --disable-sync --disable-translate --disable-breakpad --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --metrics-recording-only --mute-audio" },
+                                { name: "PLAYWRIGHT_CHROMIUM_USE_HEADLESS_NEW", value: "1" },
+                            ],
+                            volumeMounts: [
+                                {
+                                    name: "picoclaw-home",
+                                    mountPath: "/root/.picoclaw",
+                                },
+                                {
+                                    name: "secrets",
+                                    mountPath: "/run/secrets",
+                                    readOnly: true,
+                                },
+                                {
+                                    name: "openvpn-config",
+                                    mountPath: "/etc/openvpn-config",
+                                    readOnly: true,
+                                },
+                                {
+                                    name: "openvpn-auth",
+                                    mountPath: "/etc/openvpn-auth",
+                                    readOnly: true,
+                                },
+                            ],
+                            securityContext: {
+                                privileged: true, // Required for OpenVPN
+                            },
                         },
                     ],
-                },
-            },
-            {
-                name: "vpn-auth",
-                secret: {
-                    secret: vpnAuthSecret.secretId,
-                    defaultMode: 0o400,
-                    items: [
+                    volumes: [
                         {
-                            path: "auth.txt",
-                            version: "latest",
+                            name: "picoclaw-home",
+                            hostPath: {
+                                path: "/mnt/stateful_partition/picoclaw-home",
+                            },
+                        },
+                        {
+                            name: "secrets",
+                            hostPath: {
+                                path: "/mnt/stateful_partition/secrets",
+                            },
+                        },
+                        {
+                            name: "openvpn-config",
+                            hostPath: {
+                                path: "/mnt/stateful_partition/openvpn-config",
+                            },
+                        },
+                        {
+                            name: "openvpn-auth",
+                            hostPath: {
+                                path: "/mnt/stateful_partition/openvpn-auth",
+                            },
                         },
                     ],
+                    restartPolicy: "Always",
                 },
-            },
-        ],
+            })
+        ),
+        "google-logging-enabled": "true",
+        "startup-script": pulumi.all([
+            project,
+            picoclawStateBucket.name,
+            awsAccessKeySecret.name,
+            awsSecretKeySecret.name,
+            awsRegionNameSecret.name,
+            launcherTokenSecret.name,
+            vpnConfigSecret.name,
+            vpnAuthSecret.name,
+        ]).apply(([proj, bucket, awsKeySecret, awsSecretSecret, awsRegionSecret, tokenSecret, vpnCfgSecret, vpnAuthSec]) => `#!/bin/bash
+set -e
+
+# Configure docker to authenticate with Artifact Registry using service account
+docker-credential-gcr configure-docker --registries=europe-west4-docker.pkg.dev
+
+# Container-Optimized OS already has gcsfuse installed
+# Create mount point
+mkdir -p /mnt/stateful_partition/picoclaw-home
+
+# Mount GCS bucket
+gcsfuse --implicit-dirs ${bucket} /mnt/stateful_partition/picoclaw-home
+
+# Fetch secrets from Secret Manager and write to files for container
+mkdir -p /mnt/stateful_partition/secrets
+chmod 700 /mnt/stateful_partition/secrets
+
+gcloud secrets versions access latest --secret=${awsKeySecret} --project=${proj} > /mnt/stateful_partition/secrets/aws_access_key_id
+gcloud secrets versions access latest --secret=${awsSecretSecret} --project=${proj} > /mnt/stateful_partition/secrets/aws_secret_access_key
+gcloud secrets versions access latest --secret=${awsRegionSecret} --project=${proj} > /mnt/stateful_partition/secrets/aws_region
+gcloud secrets versions access latest --secret=${tokenSecret} --project=${proj} > /mnt/stateful_partition/secrets/launcher_token
+
+# Create VPN config directory
+mkdir -p /mnt/stateful_partition/openvpn-config /mnt/stateful_partition/openvpn-auth
+chmod 700 /mnt/stateful_partition/openvpn-config /mnt/stateful_partition/openvpn-auth
+
+# Fetch VPN secrets
+gcloud secrets versions access latest --secret=${vpnCfgSecret} --project=${proj} > /mnt/stateful_partition/openvpn-config/client.ovpn
+gcloud secrets versions access latest --secret=${vpnAuthSec} --project=${proj} > /mnt/stateful_partition/openvpn-auth/auth.txt
+chmod 400 /mnt/stateful_partition/openvpn-config/client.ovpn /mnt/stateful_partition/openvpn-auth/auth.txt
+`),
     },
 }, {
-    dependsOn: [iamSecretAccessor, stateBucketObjectAdmin],
+    dependsOn: [iamSecretAccessor, stateBucketObjectAdmin, artifactRegistryReader, gatewayFirewall],
 });
 
-// Temporarily disable access filtering and allow unauthenticated access.
-// Previous filtered access logic:
-// const runInvokerMembers =
-//     config.get("runInvokerMembers")?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
-// runInvokerMembers.forEach((member, i) => {
-//     new gcp.cloudrunv2.ServiceIamMember(`picoclaw-gateway-invoker-${i}`, {
-//         project,
-//         location: region,
-//         name: gatewayService.name,
-//         role: "roles/run.invoker",
-//         member,
-//     });
-// });
-new gcp.cloudrunv2.ServiceIamMember("picoclaw-gateway-public-invoker", {
-    project,
-    location: region,
-    name: gatewayService.name,
-    role: "roles/run.invoker",
-    member: "allUsers",
-});
-
-export const serviceUrl = gatewayService.uri;
-export const serviceName = gatewayService.name;
+export const instanceName = gatewayInstance.name;
+export const instanceIp = gatewayInstance.networkInterfaces.apply(
+    interfaces => interfaces?.[0]?.accessConfigs?.[0]?.natIp ?? ""
+);
+export const serviceUrl = instanceIp.apply(ip => `http://${ip}:18800`);
 export const serviceAccountEmail = gatewayServiceAccount.email;
