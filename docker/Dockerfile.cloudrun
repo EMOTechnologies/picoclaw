@@ -13,8 +13,10 @@ RUN go mod download
 
 # Copy source and build
 COPY . .
-ARG GO_BUILD_TAGS=goolm,stdjson
-RUN make build GO_BUILD_TAGS=${GO_BUILD_TAGS}
+ARG GO_BUILD_TAGS=goolm,stdjson,bedrock
+RUN make build GO_BUILD_TAGS=${GO_BUILD_TAGS} && \
+    make build-launcher GO_BUILD_TAGS=${GO_BUILD_TAGS} && \
+    make build-launcher-tui GO_BUILD_TAGS=${GO_BUILD_TAGS}
 
 # ============================================================
 # Stage 2: Runtime image with OpenVPN
@@ -37,8 +39,11 @@ RUN mkdir -p /etc/openvpn /var/log
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD wget -q --spider http://localhost:18790/health || exit 1
 
-# Copy binary and entrypoints
+# Copy binary
 COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw
+COPY --from=builder /src/build/picoclaw-launcher /usr/local/bin/picoclaw-launcher
+COPY --from=builder /src/build/picoclaw-launcher-tui /usr/local/bin/picoclaw-launcher-tui
+
 COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/vpn-entrypoint.sh /vpn-entrypoint.sh
 RUN chmod +x /entrypoint.sh /vpn-entrypoint.sh
