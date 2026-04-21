@@ -56,12 +56,16 @@ services:
   picoclaw-launcher:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.heavy
+      dockerfile: docker/Dockerfile.vm
       args:
         GO_BUILD_TAGS: goolm,stdjson,bedrock
     image: docker-picoclaw-launcher:local
     container_name: picoclaw-launcher
     restart: unless-stopped
+    cap_add:
+      - NET_ADMIN  # Required for OpenVPN
+    devices:
+      - /dev/net/tun  # Required for VPN tunnel
     profiles:
       - launcher
     environment:
@@ -79,3 +83,5 @@ services:
       - "18790:18790"
     volumes:
       - ./data:/root/.picoclaw
+      - ./vpn/client.ovpn:/etc/openvpn-config/client.ovpn:ro
+      - ./vpn/auth.txt:/etc/openvpn-auth/auth.txt:ro
