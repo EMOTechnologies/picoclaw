@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
+
+const completionMarker = "==!== process_end ==!=="
 
 // StreamingCallback is called for each message chunk received
 type StreamingCallback func(chunk string, isComplete bool) error
@@ -78,11 +81,14 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 	defer conn.Close()
 
 	// Send message using Pico Protocol format
+	// Add instruction to output completion marker at the end
+	promptWithMarker := prompt + "\n\nIMPORTANT: At the very end of your response, output exactly this marker on a new line: ==!== process_end ==!=="
+
 	message := map[string]interface{}{
 		"type":      "message.send",
 		"timestamp": time.Now().UnixMilli(),
 		"payload": map[string]interface{}{
-			"content": prompt,
+			"content": promptWithMarker,
 		},
 	}
 
@@ -181,6 +187,27 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 
 					logger.InfoC("webhook", fmt.Sprintf("Job %s - Chunk %d: +%d chars (total: %d)", jobID, messageCount, len(content), len(fullResponse)))
 
+					// Check if this chunk contains the completion marker
+					if contains := checkCompletionMarker(content); contains {
+						logger.InfoC("webhook", fmt.Sprintf("Detected completion marker in job %s", jobID))
+
+						// Remove the marker from the response
+						fullResponse = removeCompletionMarker(fullResponse)
+
+						// Send final chunk without the marker
+						cleanContent := removeCompletionMarker(content)
+						if cleanContent != "" {
+							if err := sendStreamingWebhook(webhookURL, jobID, sessionID, cleanContent, false, fullResponse, messageCount, nil); err != nil {
+								logger.ErrorC("webhook", fmt.Sprintf("Failed to send webhook callback for job %s chunk %d: %v", jobID, messageCount, err))
+							}
+						}
+
+						// Send completion callback
+						sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil)
+						conn.Close()
+						return fullResponse, messageCount, nil
+					}
+
 					// Send webhook callback for this chunk
 					if err := sendStreamingWebhook(webhookURL, jobID, sessionID, content, false, fullResponse, messageCount, nil); err != nil {
 						logger.ErrorC("webhook", fmt.Sprintf("Failed to send webhook callback for job %s chunk %d: %v", jobID, messageCount, err))
@@ -261,4 +288,14 @@ func sendStreamingWebhook(webhookURL, jobID, sessionID, chunk string, isComplete
 	}
 
 	return SendWebhookRequest(req)
+}
+
+// checkCompletionMarker checks if the content contains the completion marker
+func checkCompletionMarker(content string) bool {
+	return strings.Contains(content, completionMarker)
+}
+
+// removeCompletionMarker removes the completion marker from the content
+func removeCompletionMarker(content string) string {
+	return strings.ReplaceAll(content, completionMarker, "")
 }
