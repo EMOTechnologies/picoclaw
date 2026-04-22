@@ -29,22 +29,53 @@ func PicoClawProcessor(wsURL, token string) ProcessorFunc {
 			return nil, fmt.Errorf("prompt must be a string")
 		}
 
+		// Extract webhook callback info and session from context if available
+		var webhookURL string
+		var jobID string
+		var sessionID string
+		if val := ctx.Value("webhook_url"); val != nil {
+			webhookURL, _ = val.(string)
+		}
+		if val := ctx.Value("job_id"); val != nil {
+			jobID, _ = val.(string)
+		}
+		if val := ctx.Value("session_id"); val != nil {
+			sessionID, _ = val.(string)
+		}
+
 		// Call PicoClaw AI via WebSocket
-		response, err := callPicoClawAI(ctx, wsURL, token, promptStr)
+		var response string
+		var messageCount int
+		var err error
+		if webhookURL != "" && jobID != "" {
+			// Use streaming mode with callbacks
+			response, messageCount, err = streamPicoClawAI(ctx, wsURL, token, promptStr, sessionID, webhookURL, jobID)
+		} else {
+			// Use non-streaming mode
+			response, err = callPicoClawAI(ctx, wsURL, token, promptStr, sessionID)
+		}
+
 		if err != nil {
 			return nil, fmt.Errorf("AI processing failed: %w", err)
 		}
 
 		// Return result in expected format
-		return map[string]interface{}{
+		result := map[string]interface{}{
 			"data":  response,
 			"error": nil,
-		}, nil
+		}
+
+		// Add message_count if streaming was used (signals to skip duplicate final webhook)
+		if messageCount > 0 {
+			result["message_count"] = messageCount
+		}
+
+		return result, nil
 	}
 }
 
 // callPicoClawAI sends a message to PicoClaw via WebSocket and waits for response
-func callPicoClawAI(ctx context.Context, wsURL, token, prompt string) (string, error) {
+func callPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID string) (string, error) {
 	// Set up WebSocket connection with timeout
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
@@ -55,18 +86,17 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt string) (string, e
 		"Authorization": {"Bearer " + token},
 	}
 
-	conn, _, err := dialer.DialContext(ctx, wsURL, headers)
+	// Add session_id to WebSocket URL if provided
+	wsURLWithSession := wsURL
+	if sessionID != "" {
+		wsURLWithSession = fmt.Sprintf("%s?session_id=%s", wsURL, sessionID)
+	}
+
+	conn, _, err := dialer.DialContext(ctx, wsURLWithSession, headers)
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to PicoClaw: %w", err)
 	}
 	defer conn.Close()
-
-	// Set read deadline
-	deadline := time.Now().Add(2 * time.Minute)
-	if d, ok := ctx.Deadline(); ok {
-		deadline = d
-	}
-	conn.SetReadDeadline(deadline)
 
 	// Send message using Pico Protocol format
 	message := map[string]interface{}{
@@ -87,17 +117,20 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt string) (string, e
 	// The Pico protocol streams responses as multiple message.create messages
 	var fullResponse string
 	var messageCount int
-	idleTimeout := 2 * time.Second  // Wait 2 seconds after last chunk
+	idleTimeout := 3 * time.Minute  // Fallback timeout (we have completion marker now)
 	maxWaitTime := 5 * time.Minute  // Maximum total wait time
 	startTime := time.Now()
+	receivedFirstMessage := false
 
 	for {
 		// Check overall timeout
 		if time.Since(startTime) > maxWaitTime {
 			if fullResponse != "" {
 				logger.InfoC("webhook", fmt.Sprintf("Max wait time reached, returning collected response (%d messages)", messageCount))
+				conn.Close()
 				return fullResponse, nil
 			}
+			conn.Close()
 			return "", fmt.Errorf("no response received within maximum wait time")
 		}
 
@@ -109,8 +142,10 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt string) (string, e
 		case <-ctx.Done():
 			if fullResponse != "" {
 				logger.InfoC("webhook", "Context cancelled, returning partial response")
+				conn.Close()
 				return fullResponse, nil
 			}
+			conn.Close()
 			return "", ctx.Err()
 		default:
 		}
@@ -121,11 +156,13 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt string) (string, e
 		if err != nil {
 			// Check if this is a timeout (means stream is complete)
 			if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
-				if fullResponse != "" {
+				if receivedFirstMessage && fullResponse != "" {
 					logger.InfoC("webhook", fmt.Sprintf("Stream complete: received %d message chunks, total length: %d", messageCount, len(fullResponse)))
+					conn.Close()
 					return fullResponse, nil
 				}
 				// No response yet, keep waiting
+				logger.DebugC("webhook", "Timeout waiting for messages, continuing...")
 				continue
 			}
 
@@ -153,6 +190,7 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt string) (string, e
 
 				if content, ok := payload["content"].(string); ok && content != "" {
 					messageCount++
+					receivedFirstMessage = true
 					fullResponse += content
 					logger.DebugC("webhook", fmt.Sprintf("Chunk %d: +%d chars (total: %d)", messageCount, len(content), len(fullResponse)))
 				}
@@ -174,6 +212,7 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt string) (string, e
 				}
 			}
 			logger.ErrorC("webhook", fmt.Sprintf("AI returned error: %s", errorMsg))
+			conn.Close()
 			return "", fmt.Errorf("AI error: %s", errorMsg)
 		case "pong":
 			continue

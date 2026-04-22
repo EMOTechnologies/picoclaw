@@ -88,7 +88,7 @@ func (h *Handler) handleWebhookStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(job)
 }
 
-// getWebhookProcessor returns the webhook processor instance
+// getWebhookProcessor returns the webhook processor instance (non-streaming)
 // It lazily initializes the processor on first use
 func (h *Handler) getWebhookProcessor() *webhook.Processor {
 	h.webhookMu.Lock()

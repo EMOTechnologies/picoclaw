@@ -24,14 +24,15 @@ Background processor:
   4. Collects AI response
   5. POSTs result to webhook_url
        ↓
-Your webhook receives:
+Your webhook receives streaming callbacks:
 {
   "job_id": "uuid",
-  "status": "completed",
-  "result": {
-    "data": "<AI response here>",
-    "error": null
-  },
+  "session_id": "uuid", 
+  "status": "streaming",
+  "message": "AI response chunk",
+  "accumulated_length": 150,
+  "message_count": 3,
+  "is_complete": false,
   "timestamp": "2026-04-17T10:00:05Z"
 }
 ```
