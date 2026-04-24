@@ -10,13 +10,14 @@ const (
 	TypePing        = "ping"
 
 	// TypeMessageCreate is sent from server to client.
-	TypeMessageCreate = "message.create"
-	TypeMessageUpdate = "message.update"
-	TypeMediaCreate   = "media.create"
-	TypeTypingStart   = "typing.start"
-	TypeTypingStop    = "typing.stop"
-	TypeError         = "error"
-	TypePong          = "pong"
+	TypeMessageCreate   = "message.create"
+	TypeMessageUpdate   = "message.update"
+	TypeMessageComplete = "message.complete" // Signals that AI has finished responding
+	TypeMediaCreate     = "media.create"
+	TypeTypingStart     = "typing.start"
+	TypeTypingStop      = "typing.stop"
+	TypeError           = "error"
+	TypePong            = "pong"
 
 	PicoTokenPrefix = "pico-"
 

@@ -288,6 +288,8 @@ func (c *PicoChannel) StartTyping(ctx context.Context, chatID string) (func(), e
 	return func() {
 		stopMsg := newMessage(TypeTypingStop, nil)
 		c.broadcastToSession(chatID, stopMsg)
+		// Note: Completion marker removed - it was being sent before AI responses
+		// Webhook processing now relies on idle timeout for completion detection
 	}, nil
 }
 

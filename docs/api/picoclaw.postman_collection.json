@@ -707,7 +707,7 @@
     },
     {
       "name": "Webhook",
-      "description": "Asynchronous webhook processing. Submit jobs that run in the background and POST results to your webhook URL.",
+      "description": "Asynchronous AI processing with streaming webhook callbacks. Submit jobs with prompts and receive multiple callbacks as AI generates responses. Supports session management for conversation context.",
       "item": [
         {
           "name": "Submit Processing Job",
@@ -734,10 +734,10 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"webhook_url\": \"https://webhook.site/your-unique-id\",\n  \"payload\": {\n    \"data\": \"your data here\",\n    \"priority\": \"high\",\n    \"timestamp\": \"{{$isoTimestamp}}\"\n  }\n}",
+              "raw": "{\n  \"webhook_url\": \"https://webhook.site/your-unique-id\",\n  \"session_id\": \"optional-session-for-context\",\n  \"payload\": {\n    \"prompt\": \"What is Python?\"\n  }\n}",
               "options": { "raw": { "language": "json" } }
             },
-            "description": "Submit an async job. Returns 202 Accepted with job_id. Job runs in background and results are POSTed to webhook_url.\n\nTest with webhook.site:\n1. Visit https://webhook.site\n2. Copy your unique URL\n3. Replace webhook_url above\n4. Send request\n5. Watch callback arrive at webhook.site\n\nResponse: {job_id, status: \"processing\", timestamp}\n\nWebhook receives: {job_id, status: \"completed\"|\"failed\", result: {...}|error: \"...\", timestamp}"
+            "description": "Submit an AI processing job with streaming callbacks.\n\nTest with webhook.site:\n1. Visit https://webhook.site\n2. Copy your unique URL\n3. Replace webhook_url above\n4. Send request\n5. Watch MULTIPLE callbacks arrive (streaming + completion)\n\nImmediate Response: {job_id, session_id, status: \"processing\", timestamp}\n\nWebhook Streaming Callbacks (multiple):\n{\n  job_id, session_id, status: \"streaming\",\n  message: \"chunk\", accumulated_length, message_count,\n  is_complete: false, timestamp\n}\n\nWebhook Completion Callback:\n{\n  job_id, session_id, status: \"completed\",\n  result: {message_count, error: null},\n  is_complete: true, timestamp\n}\n\nSession Management:\n- Provide same session_id for conversation context\n- Previous active connection cancelled automatically\n- Omit session_id for new conversation"
           }
         },
         {
@@ -760,7 +760,7 @@
           }
         },
         {
-          "name": "Submit Job - Example 1 (Simple)",
+          "name": "Submit Job - Example 1 (Simple AI Query)",
           "request": {
             "method": "POST",
             "url": "{{base_url}}/api/webhook/process",
@@ -769,10 +769,10 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"webhook_url\": \"https://webhook.site/test\",\n  \"payload\": {\n    \"message\": \"Hello, World!\"\n  }\n}",
+              "raw": "{\n  \"webhook_url\": \"https://webhook.site/test\",\n  \"payload\": {\n    \"prompt\": \"What is 2+2?\"\n  }\n}",
               "options": { "raw": { "language": "json" } }
             },
-            "description": "Simple example with minimal payload."
+            "description": "Simple AI query. AI will respond and webhook receives streaming chunks."
           }
         },
         {
