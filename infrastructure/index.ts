@@ -35,6 +35,11 @@ const launcherTokenSecret = gcp.secretmanager.Secret.get(
     `projects/${project}/secrets/PICOCLAW_LAUNCHER_TOKEN`,
 );
 
+const proxyUrlSecret = gcp.secretmanager.Secret.get(
+    "picoclaw-proxy-url",
+    `projects/${project}/secrets/PICOCLAW_PROXY_URL`,
+);
+
 // ─────────────────────────────────────────────
 // Dedicated service account for the Cloud Run service
 // ─────────────────────────────────────────────
@@ -139,11 +144,29 @@ const gatewayService = new gcp.cloudrunv2.Service("picoclaw-gateway", {
                             },
                         },
                     },
+                    {
+                        name: "HTTP_PROXY",
+                        valueSource: {
+                            secretKeyRef: {
+                                secret: proxyUrlSecret.secretId,
+                                version: "latest",
+                            },
+                        },
+                    },
+                    {
+                        name: "HTTPS_PROXY",
+                        valueSource: {
+                            secretKeyRef: {
+                                secret: proxyUrlSecret.secretId,
+                                version: "latest",
+                            },
+                        },
+                    }
                 ],
                 resources: {
                     limits: {
-                        cpu: "2",
-                        memory: "2048Mi",  // Increased for Chromium browser automation
+                        cpu: "1",
+                        memory: "1536Mi",  // Increased for Chromium browser automation
                     },
                     cpuIdle: true,
                 },
