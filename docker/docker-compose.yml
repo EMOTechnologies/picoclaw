@@ -72,6 +72,8 @@ services:
       - AWS_DEFAULT_REGION=${AWS_REGION_NAME:-ap-southeast-1}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - HTTP_PROXY=${HTTP_PROXY}
+      - HTTPS_PROXY=${HTTP_PROXY}
       # Set a fixed dashboard token instead of a random one each restart.
       # If not set, a random token is generated and printed to the console on startup.
     ports:

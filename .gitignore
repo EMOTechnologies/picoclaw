@@ -68,5 +68,6 @@ web/backend/dist/*
 
 docker/data/
 docker/data_gateway/
+docker/vpn/
 
 .omc/
