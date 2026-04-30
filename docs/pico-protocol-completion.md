@@ -4,7 +4,7 @@
 
 The Pico Protocol now includes an explicit completion marker that indicates when the AI has finished responding to a message. This eliminates the need for long timeout-based completion detection.
 
-## Completion Marker
+## Lifecycle Markers
 
 ### `==!== process_end ==!==`
 
@@ -28,6 +28,15 @@ This marker is:
 - ✅ Always the last message in a response
 - ✅ Easy to detect by clients
 - ✅ Backward compatible (old clients just ignore it)
+
+### `==!== process_waiting_user_input ==!==`
+
+When the AI is blocked and needs user input (OTP/MFA/CAPTCHA/password/API key/payment info), it should send this marker at the end of the current response.
+
+This marker means:
+- ✅ Workflow is paused, not finished
+- ✅ Client should emit `status: "waiting_user_input"` with `is_complete: false`
+- ✅ Processing should resume after user input is provided
 
 ## Message Flow
 
@@ -84,13 +93,14 @@ The completion marker is sent when:
 
 ### Completion Detection Order
 
-The webhook processor now detects completion via:
+The webhook processor now detects lifecycle events via:
 
-1. **Completion marker `==!== process_end ==!==`** ⭐ (Primary - instant)
-2. Idle timeout (3 minutes - fallback)
-3. WebSocket close
-4. Error message
-5. Context timeout (5 minutes)
+1. **Waiting marker `==!== process_waiting_user_input ==!==`** → `waiting_user_input` (non-terminal)
+2. **Completion marker `==!== process_end ==!==`** → `completed` (terminal)
+3. Idle timeout (3 minutes - fallback terminal)
+4. WebSocket close (fallback terminal)
+5. Error message (`failed`)
+6. Context timeout (5 minutes)
 
 ### Timing Improvement
 
