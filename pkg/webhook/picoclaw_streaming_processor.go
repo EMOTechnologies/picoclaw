@@ -207,10 +207,11 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 							}
 						}
 
-						// Send explicit waiting status without completing job
-						sendStreamingWebhook(webhookURL, jobID, sessionID, cleanContent, false, fullResponse, messageCount, nil, "waiting_user_input")
-						continue
-					}
+					// Send explicit waiting status without completing job
+					sendStreamingWebhook(webhookURL, jobID, sessionID, cleanContent, false, fullResponse, messageCount, nil, "waiting_user_input")
+					conn.Close()
+					return fullResponse, messageCount, nil
+				}
 
 					// Check if this chunk contains the completion marker
 					if contains := checkCompletionMarker(content); contains {
@@ -301,6 +302,7 @@ func sendStreamingWebhook(webhookURL, jobID, sessionID, chunk string, isComplete
 		payload["error"] = err.Error()
 	} else if explicitStatus == "waiting_user_input" {
 		payload["status"] = "waiting_user_input"
+		payload["message"] = ""
 	} else if isComplete {
 		payload["status"] = "completed"
 		payload["message"] = ""
