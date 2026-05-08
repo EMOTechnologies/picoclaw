@@ -24,6 +24,7 @@ type stubJobExecutor struct {
 	publishedResp   string
 	publishedChan   string
 	publishedChatID string
+	publishedKey    string
 }
 
 func (s *stubJobExecutor) ProcessDirectWithChannel(
@@ -39,7 +40,7 @@ func (s *stubJobExecutor) ProcessDirectWithChannel(
 
 func (s *stubJobExecutor) PublishResponseIfNeeded(
 	_ context.Context,
-	channel, chatID, response string,
+	channel, chatID, sessionKey, response string,
 ) {
 	if s.alreadySent {
 		return
@@ -47,6 +48,7 @@ func (s *stubJobExecutor) PublishResponseIfNeeded(
 	s.publishedResp = response
 	s.publishedChan = channel
 	s.publishedChatID = chatID
+	s.publishedKey = sessionKey
 }
 
 func newTestCronToolWithExecutorAndConfig(t *testing.T, executor JobExecutor, cfg *config.Config) *CronTool {
@@ -271,8 +273,8 @@ func TestCronTool_ExecuteJobPublishesAgentResponse(t *testing.T) {
 		t.Fatalf("ExecuteJob() = %q, want ok", got)
 	}
 
-	if executor.lastKey != "cron-job-1" {
-		t.Fatalf("sessionKey = %q, want cron-job-1", executor.lastKey)
+	if !strings.HasPrefix(executor.lastKey, "agent:cron-job-1-") {
+		t.Fatalf("sessionKey = %q, want agent:cron-job-1-{uuid}", executor.lastKey)
 	}
 	if executor.lastChan != "telegram" || executor.lastChatID != "chat-1" {
 		t.Fatalf("executor target = %s/%s, want telegram/chat-1", executor.lastChan, executor.lastChatID)
@@ -282,6 +284,9 @@ func TestCronTool_ExecuteJobPublishesAgentResponse(t *testing.T) {
 	}
 	if executor.publishedResp != "generated reply" {
 		t.Fatalf("published response = %q, want generated reply", executor.publishedResp)
+	}
+	if executor.publishedKey != executor.lastKey {
+		t.Fatalf("published sessionKey = %q, want %q", executor.publishedKey, executor.lastKey)
 	}
 	if executor.publishedChan != "telegram" || executor.publishedChatID != "chat-1" {
 		t.Fatalf("published target = %s/%s, want telegram/chat-1", executor.publishedChan, executor.publishedChatID)
