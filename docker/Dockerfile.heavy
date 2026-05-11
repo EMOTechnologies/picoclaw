@@ -15,8 +15,7 @@ RUN go mod download
 COPY . .
 ARG GO_BUILD_TAGS=goolm,stdjson,bedrock
 RUN make build GO_BUILD_TAGS=${GO_BUILD_TAGS} && \
-    make build-launcher GO_BUILD_TAGS=${GO_BUILD_TAGS} && \
-    make build-launcher-tui GO_BUILD_TAGS=${GO_BUILD_TAGS}
+    make build-launcher GO_BUILD_TAGS=${GO_BUILD_TAGS}
 
 # ============================================================
 # Stage 2: Node.js runtime with Python + MCP support
@@ -51,7 +50,6 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 # Copy binary
 COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw
 COPY --from=builder /src/build/picoclaw-launcher /usr/local/bin/picoclaw-launcher
-COPY --from=builder /src/build/picoclaw-launcher-tui /usr/local/bin/picoclaw-launcher-tui
 
 # Run onboard to create initial directories and config
 RUN /usr/local/bin/picoclaw onboard
