@@ -39,6 +39,8 @@ services:
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION_NAME:-ap-southeast-1}
+      - HTTP_PROXY=${HTTP_PROXY:-http://ssh-tunnel:8181}
+      - HTTPS_PROXY=${HTTPS_PROXY:-http://ssh-tunnel:8181}
     profiles:
       - gateway
     # Uncomment to access host network; leave commented unless needed.
@@ -72,8 +74,8 @@ services:
       - AWS_DEFAULT_REGION=${AWS_REGION_NAME:-ap-southeast-1}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - HTTP_PROXY=${HTTP_PROXY}
-      - HTTPS_PROXY=${HTTP_PROXY}
+      - HTTP_PROXY=${HTTP_PROXY:-http://ssh-tunnel:8181}
+      - HTTPS_PROXY=${HTTPS_PROXY:-http://ssh-tunnel:8181}
       # Set a fixed dashboard token instead of a random one each restart.
       # If not set, a random token is generated and printed to the console on startup.
     ports:
@@ -81,3 +83,38 @@ services:
       - "18790:18790"
     volumes:
       - ./data:/root/.picoclaw
+
+  # ─────────────────────────────────────────────
+  # SSH Tunnel Proxy (local dev — mirrors GCP VM setup)
+  #   docker compose -f docker/docker-compose.yml --profile launcher up
+  # Required env vars: TUNNEL_SSH_USER, TUNNEL_SSH_HOST
+  # Optional env vars: TUNNEL_SSH_PORT (default 1036), TUNNEL_REMOTE_PORT (default 8888)
+  # First run: key is generated and public key is printed — add it to the office server.
+  # ─────────────────────────────────────────────
+  ssh-tunnel:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.tunnel
+    container_name: ssh-tunnel
+    profiles:
+      - launcher
+    restart: unless-stopped
+    environment:
+      - TUNNEL_SSH_USER=${TUNNEL_SSH_USER}
+      - TUNNEL_SSH_PASSWORD=${TUNNEL_SSH_PASSWORD}
+      - TUNNEL_SSH_HOST=${TUNNEL_SSH_HOST}
+      - TUNNEL_SSH_PORT=${TUNNEL_SSH_PORT:-1036}
+      - TUNNEL_REMOTE_PORT=${TUNNEL_REMOTE_PORT:-8888}
+      - SSHPASS=${TUNNEL_SSH_PASSWORD}
+    ports:
+      - "8181:8181"
+    command: >
+      sh -c "exec sshpass -e autossh -M 0 -N
+      -p $$TUNNEL_SSH_PORT
+      -L 0.0.0.0:8181:localhost:$$TUNNEL_REMOTE_PORT
+      -o StrictHostKeyChecking=no
+      -o PreferredAuthentications=password
+      -o ServerAliveInterval=30
+      -o ServerAliveCountMax=3
+      -o ExitOnForwardFailure=yes
+      $$TUNNEL_SSH_USER@$$TUNNEL_SSH_HOST"
