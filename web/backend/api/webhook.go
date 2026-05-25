@@ -141,12 +141,7 @@ func (h *Handler) getPicoWebSocketConfig() (token string, wsURL string) {
 		return "", ""
 	}
 
-	// Get the composed token (pico-<pid_token><pico_token>)
-	composedToken := picoComposedToken("token." + picoToken)
-	if composedToken == "" {
-		logger.WarnC("webhook", "Failed to compose Pico token (gateway may not be running)")
-		return "", ""
-	}
+	composedToken := "token." + picoToken
 
 	// Construct WebSocket URL to gateway's Pico channel endpoint
 	gatewayPort := 18790
