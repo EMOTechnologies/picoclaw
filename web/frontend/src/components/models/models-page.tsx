@@ -1,39 +1,28 @@
 import { IconLoader2, IconPlus, IconStar } from "@tabler/icons-react"
 import { useCallback, useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 
-import { type ModelInfo, getModels, setDefaultModel } from "@/api/models"
+import {
+  type ModelInfo,
+  type ModelProviderOption,
+  getModels,
+  setDefaultModel,
+} from "@/api/models"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
+import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
+import { refreshGatewayState } from "@/store/gateway"
 
 import { AddModelSheet } from "./add-model-sheet"
 import { DeleteModelDialog } from "./delete-model-dialog"
 import { EditModelSheet } from "./edit-model-sheet"
-import { getProviderKey, getProviderLabel } from "./provider-label"
+import {
+  PROVIDER_PRIORITY,
+  getProviderKey,
+  getProviderLabel,
+} from "./provider-label"
 import { ProviderSection } from "./provider-section"
-
-const PROVIDER_PRIORITY: Record<string, number> = {
-  volcengine: 0,
-  openai: 1,
-  gemini: 2,
-  anthropic: 3,
-  zhipu: 4,
-  deepseek: 5,
-  openrouter: 6,
-  qwen: 7,
-  moonshot: 8,
-  groq: 9,
-  "github-copilot": 10,
-  antigravity: 11,
-  nvidia: 12,
-  cerebras: 13,
-  shengsuanyun: 14,
-  ollama: 15,
-  vllm: 16,
-  mistral: 17,
-  avian: 18,
-  mimo: 19,
-}
 
 interface ProviderGroup {
   key: string
@@ -46,6 +35,9 @@ interface ProviderGroup {
 export function ModelsPage() {
   const { t } = useTranslation()
   const [models, setModels] = useState<ModelInfo[]>([])
+  const [providerOptions, setProviderOptions] = useState<ModelProviderOption[]>(
+    [],
+  )
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState("")
 
@@ -55,6 +47,7 @@ export function ModelsPage() {
   const [settingDefaultIndex, setSettingDefaultIndex] = useState<number | null>(
     null,
   )
+  const addDisabled = loading || providerOptions.length === 0
 
   const fetchModels = useCallback(async () => {
     try {
@@ -67,6 +60,7 @@ export function ModelsPage() {
         return a.model_name.localeCompare(b.model_name)
       })
       setModels(sorted)
+      setProviderOptions(data.provider_options ?? [])
       setFetchError("")
     } catch (e) {
       setFetchError(e instanceof Error ? e.message : t("models.loadError"))
@@ -86,8 +80,15 @@ export function ModelsPage() {
     try {
       await setDefaultModel(model.model_name)
       await fetchModels()
-    } catch {
-      // ignore
+      const gateway = await refreshGatewayState({ force: true })
+      showSaveSuccessOrRestartToast(
+        t,
+        t("models.defaultChangeSuccess"),
+        model.model_name,
+        gateway?.restartRequired === true,
+      )
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t("models.loadError"))
     } finally {
       setSettingDefaultIndex(null)
     }
@@ -95,10 +96,10 @@ export function ModelsPage() {
 
   const grouped: Record<string, { label: string; models: ModelInfo[] }> = {}
   for (const model of models) {
-    const providerKey = getProviderKey(model.model)
+    const providerKey = getProviderKey(model.provider)
     if (!grouped[providerKey]) {
       grouped[providerKey] = {
-        label: getProviderLabel(model.model),
+        label: getProviderLabel(model.provider),
         models: [],
       }
     }
@@ -141,7 +142,12 @@ export function ModelsPage() {
     <div className="flex h-full flex-col">
       <PageHeader title={t("navigation.models")}>
         <div className="flex items-center gap-3">
-          <Button size="sm" variant="outline" onClick={() => setAddOpen(true)}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={addDisabled}
+            onClick={() => setAddOpen(true)}
+          >
             <IconPlus className="size-4" />
             {t("models.add.button")}
           </Button>
@@ -194,6 +200,7 @@ export function ModelsPage() {
 
       <EditModelSheet
         model={editingModel}
+        providerOptions={providerOptions}
         open={editingModel !== null}
         onClose={() => setEditingModel(null)}
         onSaved={fetchModels}
@@ -201,6 +208,7 @@ export function ModelsPage() {
 
       <AddModelSheet
         open={addOpen}
+        providerOptions={providerOptions}
         onClose={() => setAddOpen(false)}
         onSaved={fetchModels}
         existingModelNames={models.map((model) => model.model_name)}

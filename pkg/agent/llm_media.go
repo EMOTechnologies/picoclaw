@@ -29,27 +29,6 @@ func stripMessageMedia(messages []providers.Message) []providers.Message {
 	return stripped
 }
 
-func callLLMWithVisionUnsupportedRetry(
-	messages []providers.Message,
-	call func([]providers.Message) (*providers.LLMResponse, error),
-	beforeRetry func(error),
-) (*providers.LLMResponse, []providers.Message, bool, error) {
-	response, err := call(messages)
-	if err == nil {
-		return response, messages, false, nil
-	}
-	if !messagesContainMedia(messages) || !isVisionUnsupportedError(err) {
-		return response, messages, false, err
-	}
-
-	if beforeRetry != nil {
-		beforeRetry(err)
-	}
-	stripped := stripMessageMedia(messages)
-	response, err = call(stripped)
-	return response, stripped, true, err
-}
-
 func isVisionUnsupportedError(err error) bool {
 	if err == nil {
 		return false
@@ -74,6 +53,13 @@ func isVisionUnsupportedError(err error) bool {
 
 	// Some providers return a generic "invalid" message that still mentions image_url.
 	if strings.Contains(msg, "image_url") && strings.Contains(msg, "invalid") {
+		return true
+	}
+
+	// DeepSeek and other strict providers reject the image_url field at the
+	// JSON schema level with an "unknown variant" error rather than a semantic
+	// "not supported" message.
+	if strings.Contains(msg, "unknown variant") && strings.Contains(msg, "image_url") {
 		return true
 	}
 

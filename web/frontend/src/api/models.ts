@@ -6,6 +6,7 @@ import { refreshGatewayState } from "@/store/gateway"
 export interface ModelInfo {
   index: number
   model_name: string
+  provider?: string
   model: string
   api_base?: string
   api_key: string
@@ -18,6 +19,7 @@ export interface ModelInfo {
   max_tokens_field?: string
   request_timeout?: number
   thinking_level?: string
+  tool_schema_transform?: string
   extra_body?: Record<string, unknown>
   custom_headers?: Record<string, string>
   // Meta
@@ -25,12 +27,24 @@ export interface ModelInfo {
   status: "available" | "unconfigured" | "unreachable"
   is_default: boolean
   is_virtual: boolean
+  default_model_allowed?: boolean
+}
+
+export interface ModelProviderOption {
+  id: string
+  default_api_base: string
+  empty_api_key_allowed: boolean
+  create_allowed: boolean
+  default_model_allowed: boolean
+  default_auth_method?: string
+  auth_method_locked?: boolean
 }
 
 interface ModelsListResponse {
   models: ModelInfo[]
   total: number
   default_model: string
+  provider_options: ModelProviderOption[]
 }
 
 interface ModelActionResponse {
