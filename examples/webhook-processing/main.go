@@ -11,7 +11,7 @@ import (
 )
 
 // CustomProcessor demonstrates a custom processing function
-func CustomProcessor(ctx context.Context, payload map[string]interface{}) (map[string]interface{}, error) {
+func CustomProcessor(ctx context.Context, payload map[string]any) (map[string]any, error) {
 	// Simulate processing that takes some time
 	processingTime := 3 * time.Second
 
@@ -21,7 +21,7 @@ func CustomProcessor(ctx context.Context, payload map[string]interface{}) (map[s
 	case <-time.After(processingTime):
 		// Processing completed
 	case <-ctx.Done():
-		return nil, fmt.Errorf("processing cancelled: %w", ctx.Err())
+		return nil, fmt.Errorf("processing canceled: %w", ctx.Err())
 	}
 
 	// Extract and process data
@@ -33,7 +33,7 @@ func CustomProcessor(ctx context.Context, payload map[string]interface{}) (map[s
 	// Perform your custom processing here
 	processedResult := fmt.Sprintf("Processed: %v", data)
 
-	result := map[string]interface{}{
+	result := map[string]any{
 		"original_data":   data,
 		"processed_data":  processedResult,
 		"processed_at":    time.Now().Format(time.RFC3339),

@@ -517,7 +517,7 @@ var BaseFieldNames = map[string]struct{}{
 // SecureString or SecureStrings and returns their JSON field names.
 func extractSecureFieldNames(target any) map[string]struct{} {
 	v := reflect.ValueOf(target)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 	if v.Kind() != reflect.Struct {

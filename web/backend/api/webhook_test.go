@@ -173,6 +173,9 @@ func TestWebhookEndToEnd(t *testing.T) {
 	h := &Handler{
 		configPath: "/tmp/test-config.json",
 	}
+	// Disable SSRF validation so the test can use an httptest loopback server.
+	h.webhookProcessor = webhook.NewProcessor(webhook.ExampleProcessor)
+	h.webhookProcessor.URLValidator = nil
 
 	// Create a test server to receive webhooks
 	webhookReceived := make(chan webhook.WebhookPayload, 1)

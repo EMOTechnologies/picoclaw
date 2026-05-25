@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
@@ -60,7 +61,10 @@ func PicoClawStreamingProcessor(wsURL, token string, webhookURL string, jobID st
 }
 
 // streamPicoClawAI connects to PicoClaw and streams responses via webhook callbacks
-func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webhookURL, jobID string) (string, int, error) {
+func streamPicoClawAI(
+	ctx context.Context,
+	wsURL, token, prompt, sessionID, webhookURL, jobID string,
+) (string, int, error) {
 	// Set up WebSocket connection with timeout
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
@@ -77,17 +81,20 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 		wsURLWithSession = fmt.Sprintf("%s?session_id=%s", wsURL, sessionID)
 	}
 
-	conn, _, err := dialer.DialContext(ctx, wsURLWithSession, headers)
+	conn, resp, err := dialer.DialContext(ctx, wsURLWithSession, headers)
 	if err != nil {
+		if resp != nil {
+			resp.Body.Close()
+		}
 		return "", 0, fmt.Errorf("failed to connect to PicoClaw: %w", err)
 	}
 	defer conn.Close()
 
-		// Send message using Pico Protocol format
-		// Add instruction to output lifecycle markers:
-		// - waiting marker when blocked on user input (OTP/CAPTCHA/etc.)
-		// - completion marker only when workflow is truly done
-		promptWithMarker := prompt + "\n\nIMPORTANT:\n- If you are waiting for user input or user action (OTP/MFA/CAPTCHA/password/API keys/payment info/any other action required by the user to continue), output exactly this marker on a new line at the end of your response: ==!== process_waiting_user_input ==!==\n- Only when the workflow is fully complete, output exactly this marker on a new line at the end of your response: ==!== process_end ==!=="
+	// Send message using Pico Protocol format
+	// Add instruction to output lifecycle markers:
+	// - waiting marker when blocked on user input (OTP/CAPTCHA/etc.)
+	// - completion marker only when workflow is truly done
+	promptWithMarker := prompt + "\n\nIMPORTANT:\n- If you are waiting for user input or user action (OTP/MFA/CAPTCHA/password/API keys/payment info/any other action required by the user to continue), output exactly this marker on a new line at the end of your response: ==!== process_waiting_user_input ==!==\n- Only when the workflow is fully complete, output exactly this marker on a new line at the end of your response: ==!== process_end ==!=="
 
 	message := map[string]any{
 		"type":      "message.send",
@@ -106,8 +113,8 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 	// Read responses and send webhook callback for each chunk
 	var fullResponse string
 	var messageCount int
-	idleTimeout := 3 * time.Minute  // Fallback timeout (we have completion marker now)
-	maxWaitTime := 5 * time.Minute  // Maximum total wait time
+	idleTimeout := 3 * time.Minute // Fallback timeout (we have completion marker now)
+	maxWaitTime := 5 * time.Minute // Maximum total wait time
 	startTime := time.Now()
 	receivedFirstMessage := false
 
@@ -115,7 +122,10 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 		// Check overall timeout
 		if time.Since(startTime) > maxWaitTime {
 			if fullResponse != "" {
-				logger.InfoC("webhook", fmt.Sprintf("Max wait time reached for job %s, collected %d messages", jobID, messageCount))
+				logger.InfoC(
+					"webhook",
+					fmt.Sprintf("Max wait time reached for job %s, collected %d messages", jobID, messageCount),
+				)
 				// Send final completion callback
 				sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "")
 				// Close connection immediately after completion
@@ -131,7 +141,7 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 		select {
 		case <-ctx.Done():
 			if fullResponse != "" {
-				logger.InfoC("webhook", fmt.Sprintf("Context cancelled for job %s, returning partial response", jobID))
+				logger.InfoC("webhook", fmt.Sprintf("Context canceled for job %s, returning partial response", jobID))
 				sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "")
 				// Close connection immediately
 				conn.Close()
@@ -143,12 +153,19 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 
 		var msg map[string]any
 		err := conn.ReadJSON(&msg)
-
 		if err != nil {
 			// Check if this is a timeout (means stream is complete)
 			if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
 				if receivedFirstMessage && fullResponse != "" {
-					logger.InfoC("webhook", fmt.Sprintf("Stream complete for job %s: %d messages, %d chars", jobID, messageCount, len(fullResponse)))
+					logger.InfoC(
+						"webhook",
+						fmt.Sprintf(
+							"Stream complete for job %s: %d messages, %d chars",
+							jobID,
+							messageCount,
+							len(fullResponse),
+						),
+					)
 					// Send final completion callback
 					sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "")
 					// Close connection immediately after completion
@@ -162,7 +179,10 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 				if fullResponse != "" {
-					logger.InfoC("webhook", fmt.Sprintf("Connection closed for job %s, %d messages collected", jobID, messageCount))
+					logger.InfoC(
+						"webhook",
+						fmt.Sprintf("Connection closed for job %s, %d messages collected", jobID, messageCount),
+					)
 					sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "")
 					// Connection already closed by error
 					return fullResponse, messageCount, nil
@@ -190,7 +210,16 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 					receivedFirstMessage = true
 					fullResponse += content
 
-					logger.InfoC("webhook", fmt.Sprintf("Job %s - Chunk %d: +%d chars (total: %d)", jobID, messageCount, len(content), len(fullResponse)))
+					logger.InfoC(
+						"webhook",
+						fmt.Sprintf(
+							"Job %s - Chunk %d: +%d chars (total: %d)",
+							jobID,
+							messageCount,
+							len(content),
+							len(fullResponse),
+						),
+					)
 
 					// Check if this chunk contains waiting-for-user-input marker
 					if contains := checkWaitingUserInputMarker(content); contains {
@@ -202,16 +231,44 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 
 						// Send streaming chunk first if there's remaining text
 						if cleanContent != "" {
-							if err := sendStreamingWebhook(webhookURL, jobID, sessionID, cleanContent, false, fullResponse, messageCount, nil, ""); err != nil {
-								logger.ErrorC("webhook", fmt.Sprintf("Failed to send webhook callback for job %s chunk %d: %v", jobID, messageCount, err))
+							if err := sendStreamingWebhook(
+								webhookURL,
+								jobID,
+								sessionID,
+								cleanContent,
+								false,
+								fullResponse,
+								messageCount,
+								nil,
+								"",
+							); err != nil {
+								logger.ErrorC(
+									"webhook",
+									fmt.Sprintf(
+										"Failed to send webhook callback for job %s chunk %d: %v",
+										jobID,
+										messageCount,
+										err,
+									),
+								)
 							}
 						}
 
-					// Send explicit waiting status without completing job
-					sendStreamingWebhook(webhookURL, jobID, sessionID, cleanContent, false, fullResponse, messageCount, nil, "waiting_user_input")
-					conn.Close()
-					return fullResponse, messageCount, nil
-				}
+						// Send explicit waiting status without completing job
+						sendStreamingWebhook(
+							webhookURL,
+							jobID,
+							sessionID,
+							cleanContent,
+							false,
+							fullResponse,
+							messageCount,
+							nil,
+							"waiting_user_input",
+						)
+						conn.Close()
+						return fullResponse, messageCount, nil
+					}
 
 					// Check if this chunk contains the completion marker
 					if contains := checkCompletionMarker(content); contains {
@@ -223,20 +280,66 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 						// Send final chunk without the marker
 						cleanContent := removeCompletionMarker(content)
 						if cleanContent != "" {
-							if err := sendStreamingWebhook(webhookURL, jobID, sessionID, cleanContent, false, fullResponse, messageCount, nil, ""); err != nil {
-								logger.ErrorC("webhook", fmt.Sprintf("Failed to send webhook callback for job %s chunk %d: %v", jobID, messageCount, err))
+							if err := sendStreamingWebhook(
+								webhookURL,
+								jobID,
+								sessionID,
+								cleanContent,
+								false,
+								fullResponse,
+								messageCount,
+								nil,
+								"",
+							); err != nil {
+								logger.ErrorC(
+									"webhook",
+									fmt.Sprintf(
+										"Failed to send webhook callback for job %s chunk %d: %v",
+										jobID,
+										messageCount,
+										err,
+									),
+								)
 							}
 						}
 
 						// Send completion callback
-						sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "")
+						sendStreamingWebhook(
+							webhookURL,
+							jobID,
+							sessionID,
+							"",
+							true,
+							fullResponse,
+							messageCount,
+							nil,
+							"",
+						)
 						conn.Close()
 						return fullResponse, messageCount, nil
 					}
 
 					// Send webhook callback for this chunk
-					if err := sendStreamingWebhook(webhookURL, jobID, sessionID, content, false, fullResponse, messageCount, nil, ""); err != nil {
-						logger.ErrorC("webhook", fmt.Sprintf("Failed to send webhook callback for job %s chunk %d: %v", jobID, messageCount, err))
+					if err := sendStreamingWebhook(
+						webhookURL,
+						jobID,
+						sessionID,
+						content,
+						false,
+						fullResponse,
+						messageCount,
+						nil,
+						"",
+					); err != nil {
+						logger.ErrorC(
+							"webhook",
+							fmt.Sprintf(
+								"Failed to send webhook callback for job %s chunk %d: %v",
+								jobID,
+								messageCount,
+								err,
+							),
+						)
 						// Continue processing even if webhook fails
 					}
 				}
@@ -278,7 +381,14 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 }
 
 // sendStreamingWebhook sends a webhook callback for each chunk
-func sendStreamingWebhook(webhookURL, jobID, sessionID, chunk string, isComplete bool, fullResponse string, messageCount int, err error, explicitStatus string) error {
+func sendStreamingWebhook(
+	webhookURL, jobID, sessionID, chunk string,
+	isComplete bool,
+	fullResponse string,
+	messageCount int,
+	err error,
+	explicitStatus string,
+) error {
 	message := chunk
 	if isComplete {
 		message = fullResponse
@@ -288,12 +398,12 @@ func sendStreamingWebhook(webhookURL, jobID, sessionID, chunk string, isComplete
 	}
 
 	payload := map[string]any{
-		"job_id":        jobID,
-		"session_id":    sessionID,
-		"timestamp":     time.Now(),
-		"is_complete":   isComplete,
-		"message_count": messageCount,
-		"message":       message,
+		"job_id":             jobID,
+		"session_id":         sessionID,
+		"timestamp":          time.Now(),
+		"is_complete":        isComplete,
+		"message_count":      messageCount,
+		"message":            message,
 		"accumulated_length": len(fullResponse),
 	}
 

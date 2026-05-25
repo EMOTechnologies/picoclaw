@@ -12,14 +12,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 // ProcessRequest represents an incoming request to process asynchronously
 type ProcessRequest struct {
-	WebhookURL string                 `json:"webhook_url"`
+	WebhookURL string         `json:"webhook_url"`
 	Payload    map[string]any `json:"payload"`
-	SessionID  string                 `json:"session_id,omitempty"` // Optional session ID for conversation context
+	SessionID  string         `json:"session_id,omitempty"` // Optional session ID for conversation context
 }
 
 // ProcessResponse is returned immediately when a job is accepted
@@ -32,33 +33,34 @@ type ProcessResponse struct {
 
 // WebhookPayload is sent to the webhook URL when processing completes
 type WebhookPayload struct {
-	JobID     string                 `json:"job_id"`
-	SessionID string                 `json:"session_id"` // Session ID for conversation context
-	Status    string                 `json:"status"`
+	JobID     string         `json:"job_id"`
+	SessionID string         `json:"session_id"` // Session ID for conversation context
+	Status    string         `json:"status"`
 	Result    map[string]any `json:"result,omitempty"`
-	Error     string                 `json:"error,omitempty"`
-	Timestamp time.Time              `json:"timestamp"`
+	Error     string         `json:"error,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
 }
 
 // Processor handles async processing and webhook callbacks
 type Processor struct {
-	mu              sync.RWMutex
-	jobs            map[string]*Job
-	httpClient      *http.Client
-	processorFn     ProcessorFunc
-	activeConnsMu   sync.Mutex
-	activeConns     map[string]context.CancelFunc // session_id -> cancel function
+	mu            sync.RWMutex
+	jobs          map[string]*Job
+	httpClient    *http.Client
+	processorFn   ProcessorFunc
+	activeConnsMu sync.Mutex
+	activeConns   map[string]context.CancelFunc // session_id -> cancel function
+	URLValidator  func(string) error            // defaults to validateWebhookURL; set nil to skip in tests
 }
 
 // Job tracks the state of an async job
 type Job struct {
-	ID          string                 `json:"id"`
-	WebhookURL  string                 `json:"webhook_url"`
+	ID          string         `json:"id"`
+	WebhookURL  string         `json:"webhook_url"`
 	Payload     map[string]any `json:"payload"`
-	SessionID   string                 `json:"session_id"`
-	Status      string                 `json:"status"`
-	CreatedAt   time.Time              `json:"created_at"`
-	CompletedAt *time.Time             `json:"completed_at,omitempty"`
+	SessionID   string         `json:"session_id"`
+	Status      string         `json:"status"`
+	CreatedAt   time.Time      `json:"created_at"`
+	CompletedAt *time.Time     `json:"completed_at,omitempty"`
 }
 
 // ProcessorFunc is the actual processing function to be executed
@@ -71,8 +73,9 @@ func NewProcessor(processorFn ProcessorFunc) *Processor {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		processorFn: processorFn,
-		activeConns: make(map[string]context.CancelFunc),
+		processorFn:  processorFn,
+		activeConns:  make(map[string]context.CancelFunc),
+		URLValidator: validateWebhookURL,
 	}
 }
 
@@ -81,8 +84,10 @@ func (p *Processor) Submit(req ProcessRequest) (*ProcessResponse, error) {
 	if req.WebhookURL == "" {
 		return nil, fmt.Errorf("webhook_url is required")
 	}
-	if err := validateWebhookURL(req.WebhookURL); err != nil {
-		return nil, err
+	if p.URLValidator != nil {
+		if err := p.URLValidator(req.WebhookURL); err != nil {
+			return nil, err
+		}
 	}
 
 	jobID := uuid.New().String()
@@ -141,7 +146,7 @@ func (p *Processor) cancelExistingConnection(sessionID string) {
 	defer p.activeConnsMu.Unlock()
 
 	if cancel, exists := p.activeConns[sessionID]; exists {
-		logger.InfoC("webhook", fmt.Sprintf("Cancelling existing connection for session %s", sessionID))
+		logger.InfoC("webhook", fmt.Sprintf("Canceling existing connection for session %s", sessionID))
 		cancel()
 		delete(p.activeConns, sessionID)
 	}
@@ -247,7 +252,10 @@ func (p *Processor) processJob(job *Job) {
 			})
 		}
 	} else {
-		logger.DebugC("webhook", fmt.Sprintf("Skipping final webhook for job %s (streaming mode already sent completion)", job.ID))
+		logger.DebugC(
+			"webhook",
+			fmt.Sprintf("Skipping final webhook for job %s (streaming mode already sent completion)", job.ID),
+		)
 	}
 }
 
@@ -272,9 +280,6 @@ func validateWebhookURL(rawURL string) error {
 
 // NewWebhookRequest creates an HTTP request for webhook callback
 func NewWebhookRequest(webhookURL string, body []byte) (*http.Request, error) {
-	if err := validateWebhookURL(webhookURL); err != nil {
-		return nil, err
-	}
 	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create webhook request: %w", err)
