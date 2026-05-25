@@ -12,7 +12,7 @@ import (
 
 // PicoClawProcessor creates a processor that uses PicoClaw's AI agent
 func PicoClawProcessor(wsURL, token string) ProcessorFunc {
-	return func(ctx context.Context, payload map[string]interface{}) (map[string]interface{}, error) {
+	return func(ctx context.Context, payload map[string]any) (map[string]any, error) {
 		// Extract prompt from payload
 		prompt, ok := payload["prompt"]
 		if !ok {
@@ -60,7 +60,7 @@ func PicoClawProcessor(wsURL, token string) ProcessorFunc {
 		}
 
 		// Return result in expected format
-		result := map[string]interface{}{
+		result := map[string]any{
 			"data":  response,
 			"error": nil,
 		}
@@ -99,10 +99,10 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID string)
 	defer conn.Close()
 
 	// Send message using Pico Protocol format
-	message := map[string]interface{}{
+	message := map[string]any{
 		"type":      "message.send",
 		"timestamp": time.Now().UnixMilli(),
-		"payload": map[string]interface{}{
+		"payload": map[string]any{
 			"content": prompt,
 		},
 	}
@@ -150,7 +150,7 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID string)
 		default:
 		}
 
-		var msg map[string]interface{}
+		var msg map[string]any
 		err := conn.ReadJSON(&msg)
 
 		if err != nil {
@@ -181,7 +181,7 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID string)
 		switch msgType {
 		case "message.create":
 			// Extract content from payload
-			if payload, ok := msg["payload"].(map[string]interface{}); ok {
+			if payload, ok := msg["payload"].(map[string]any); ok {
 				// Check if this is a thought message (skip it)
 				if thought, ok := payload["thought"].(bool); ok && thought {
 					logger.DebugC("webhook", "Received thought message (skipping)")
@@ -204,7 +204,7 @@ func callPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID string)
 		case "error":
 			// Extract error from payload
 			errorMsg := "unknown error"
-			if payload, ok := msg["payload"].(map[string]interface{}); ok {
+			if payload, ok := msg["payload"].(map[string]any); ok {
 				if message, ok := payload["message"].(string); ok {
 					errorMsg = message
 				} else if code, ok := payload["code"].(string); ok {

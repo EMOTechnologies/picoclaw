@@ -21,7 +21,7 @@ type StreamingCallback func(chunk string, isComplete bool) error
 
 // PicoClawStreamingProcessor creates a processor that streams AI responses via callbacks
 func PicoClawStreamingProcessor(wsURL, token string, webhookURL string, jobID string) ProcessorFunc {
-	return func(ctx context.Context, payload map[string]interface{}) (map[string]interface{}, error) {
+	return func(ctx context.Context, payload map[string]any) (map[string]any, error) {
 		// Extract prompt from payload
 		prompt, ok := payload["prompt"]
 		if !ok {
@@ -51,7 +51,7 @@ func PicoClawStreamingProcessor(wsURL, token string, webhookURL string, jobID st
 		}
 
 		// Return final result
-		return map[string]interface{}{
+		return map[string]any{
 			"data":          fullResponse,
 			"message_count": messageCount,
 			"error":         nil,
@@ -89,10 +89,10 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 		// - completion marker only when workflow is truly done
 		promptWithMarker := prompt + "\n\nIMPORTANT:\n- If you are waiting for user input or user action (OTP/MFA/CAPTCHA/password/API keys/payment info/any other action required by the user to continue), output exactly this marker on a new line at the end of your response: ==!== process_waiting_user_input ==!==\n- Only when the workflow is fully complete, output exactly this marker on a new line at the end of your response: ==!== process_end ==!=="
 
-	message := map[string]interface{}{
+	message := map[string]any{
 		"type":      "message.send",
 		"timestamp": time.Now().UnixMilli(),
-		"payload": map[string]interface{}{
+		"payload": map[string]any{
 			"content": promptWithMarker,
 		},
 	}
@@ -141,7 +141,7 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 		default:
 		}
 
-		var msg map[string]interface{}
+		var msg map[string]any
 		err := conn.ReadJSON(&msg)
 
 		if err != nil {
@@ -178,7 +178,7 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 		switch msgType {
 		case "message.create":
 			// Extract content from payload
-			if payload, ok := msg["payload"].(map[string]interface{}); ok {
+			if payload, ok := msg["payload"].(map[string]any); ok {
 				// Check if this is a thought message (skip it)
 				if thought, ok := payload["thought"].(bool); ok && thought {
 					logger.DebugC("webhook", fmt.Sprintf("Received thought message for job %s (skipping)", jobID))
@@ -250,7 +250,7 @@ func streamPicoClawAI(ctx context.Context, wsURL, token, prompt, sessionID, webh
 		case "error":
 			// Extract error from payload
 			errorMsg := "unknown error"
-			if payload, ok := msg["payload"].(map[string]interface{}); ok {
+			if payload, ok := msg["payload"].(map[string]any); ok {
 				if message, ok := payload["message"].(string); ok {
 					errorMsg = message
 				} else if code, ok := payload["code"].(string); ok {
@@ -287,7 +287,7 @@ func sendStreamingWebhook(webhookURL, jobID, sessionID, chunk string, isComplete
 		message = fullResponse
 	}
 
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"job_id":        jobID,
 		"session_id":    sessionID,
 		"timestamp":     time.Now(),
@@ -307,7 +307,7 @@ func sendStreamingWebhook(webhookURL, jobID, sessionID, chunk string, isComplete
 		payload["status"] = "completed"
 		payload["message"] = ""
 		// Preserve result metadata for compatibility with existing consumers.
-		payload["result"] = map[string]interface{}{
+		payload["result"] = map[string]any{
 			"message_count": messageCount,
 			"error":         nil,
 		}

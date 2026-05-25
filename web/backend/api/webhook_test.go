@@ -88,7 +88,7 @@ func TestHandleWebhookStatus(t *testing.T) {
 	processor := h.getWebhookProcessor()
 	resp, err := processor.Submit(webhook.ProcessRequest{
 		WebhookURL: "https://webhook.site/test",
-		Payload: map[string]interface{}{
+		Payload: map[string]any{
 			"data": "test",
 		},
 	})
@@ -189,9 +189,9 @@ func TestWebhookEndToEnd(t *testing.T) {
 	defer webhookServer.Close()
 
 	// Submit job
-	reqBody := map[string]interface{}{
+	reqBody := map[string]any{
 		"webhook_url": webhookServer.URL,
-		"payload": map[string]interface{}{
+		"payload": map[string]any{
 			"data": "test data",
 		},
 	}

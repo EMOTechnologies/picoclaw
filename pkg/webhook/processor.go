@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +18,7 @@ import (
 // ProcessRequest represents an incoming request to process asynchronously
 type ProcessRequest struct {
 	WebhookURL string                 `json:"webhook_url"`
-	Payload    map[string]interface{} `json:"payload"`
+	Payload    map[string]any `json:"payload"`
 	SessionID  string                 `json:"session_id,omitempty"` // Optional session ID for conversation context
 }
 
@@ -33,7 +35,7 @@ type WebhookPayload struct {
 	JobID     string                 `json:"job_id"`
 	SessionID string                 `json:"session_id"` // Session ID for conversation context
 	Status    string                 `json:"status"`
-	Result    map[string]interface{} `json:"result,omitempty"`
+	Result    map[string]any `json:"result,omitempty"`
 	Error     string                 `json:"error,omitempty"`
 	Timestamp time.Time              `json:"timestamp"`
 }
@@ -50,17 +52,17 @@ type Processor struct {
 
 // Job tracks the state of an async job
 type Job struct {
-	ID          string
-	WebhookURL  string
-	Payload     map[string]interface{}
-	SessionID   string     // Session ID for conversation context
-	Status      string
-	CreatedAt   time.Time
-	CompletedAt *time.Time
+	ID          string                 `json:"id"`
+	WebhookURL  string                 `json:"webhook_url"`
+	Payload     map[string]any `json:"payload"`
+	SessionID   string                 `json:"session_id"`
+	Status      string                 `json:"status"`
+	CreatedAt   time.Time              `json:"created_at"`
+	CompletedAt *time.Time             `json:"completed_at,omitempty"`
 }
 
 // ProcessorFunc is the actual processing function to be executed
-type ProcessorFunc func(ctx context.Context, payload map[string]interface{}) (map[string]interface{}, error)
+type ProcessorFunc func(ctx context.Context, payload map[string]any) (map[string]any, error)
 
 // NewProcessor creates a new webhook processor
 func NewProcessor(processorFn ProcessorFunc) *Processor {
@@ -78,6 +80,9 @@ func NewProcessor(processorFn ProcessorFunc) *Processor {
 func (p *Processor) Submit(req ProcessRequest) (*ProcessResponse, error) {
 	if req.WebhookURL == "" {
 		return nil, fmt.Errorf("webhook_url is required")
+	}
+	if err := validateWebhookURL(req.WebhookURL); err != nil {
+		return nil, err
 	}
 
 	jobID := uuid.New().String()
@@ -246,8 +251,30 @@ func (p *Processor) processJob(job *Job) {
 	}
 }
 
+// validateWebhookURL rejects non-HTTPS and private/loopback destinations to prevent SSRF.
+func validateWebhookURL(rawURL string) error {
+	u, err := url.ParseRequestURI(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid webhook_url: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("webhook_url must use https scheme, got %q", u.Scheme)
+	}
+	host := strings.ToLower(u.Hostname())
+	blocked := []string{"localhost", "127.", "::1", "0.", "169.254.", "10.", "192.168.", "172."}
+	for _, prefix := range blocked {
+		if host == strings.TrimSuffix(prefix, ".") || strings.HasPrefix(host, prefix) {
+			return fmt.Errorf("webhook_url targets a private/loopback address")
+		}
+	}
+	return nil
+}
+
 // NewWebhookRequest creates an HTTP request for webhook callback
 func NewWebhookRequest(webhookURL string, body []byte) (*http.Request, error) {
+	if err := validateWebhookURL(webhookURL); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create webhook request: %w", err)
@@ -265,7 +292,7 @@ func SendWebhookRequest(req *http.Request) error {
 		Timeout: 30 * time.Second,
 	}
 
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- URL validated by validateWebhookURL before request creation
 	if err != nil {
 		return fmt.Errorf("webhook request failed: %w", err)
 	}

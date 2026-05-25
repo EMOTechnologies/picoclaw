@@ -7,7 +7,7 @@ import (
 )
 
 // ExampleProcessor demonstrates how to implement a custom processor function
-func ExampleProcessor(ctx context.Context, payload map[string]interface{}) (map[string]interface{}, error) {
+func ExampleProcessor(ctx context.Context, payload map[string]any) (map[string]any, error) {
 	// Simulate some processing work
 	select {
 	case <-time.After(2 * time.Second):
@@ -23,7 +23,7 @@ func ExampleProcessor(ctx context.Context, payload map[string]interface{}) (map[
 	}
 
 	// Return processed result
-	result := map[string]interface{}{
+	result := map[string]any{
 		"processed_data": inputData,
 		"processed_at":   time.Now().Format(time.RFC3339),
 		"message":        "Processing completed successfully",
