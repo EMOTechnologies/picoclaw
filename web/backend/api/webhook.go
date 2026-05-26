@@ -141,8 +141,6 @@ func (h *Handler) getPicoWebSocketConfig() (token string, wsURL string) {
 		return "", ""
 	}
 
-	composedToken := "token." + picoToken
-
 	// Construct WebSocket URL to gateway's Pico channel endpoint
 	gatewayPort := 18790
 	if cfg.Gateway.Port != 0 {
@@ -150,7 +148,7 @@ func (h *Handler) getPicoWebSocketConfig() (token string, wsURL string) {
 	}
 	wsURL = fmt.Sprintf("ws://localhost:%d/pico/ws", gatewayPort)
 
-	return composedToken, wsURL
+	return picoToken, wsURL
 }
 
 // runWebhookCleanup periodically cleans up old webhook jobs
