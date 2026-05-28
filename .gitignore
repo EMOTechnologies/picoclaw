@@ -70,8 +70,16 @@ web/backend/dist/*
 
 .claude/
 
-docker/data/
 docker/data_gateway/
 docker/vpn/
+
+docker/data/.security.yml
+docker/data/config.json
+docker/data/*.db
+docker/data/logs/
+docker/data/workspace/node_modules/
+docker/data/workspace/test-results/
+docker/data/workspace/heartbeat.log
+docker/data/workspace/state/state.json
 
 .omc/

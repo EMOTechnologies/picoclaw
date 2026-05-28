@@ -1,0 +1,170 @@
+Before generating anything, read and follow:
+
+- /skills/playwright/SKILL.md
+- /skills/app-selectors/SKILL.md
+- /skills/app-selectors-flow-designer/SKILL.md
+- /skills/app-selectors-flow-designer-canvas/SKILL.md
+- /tests/flow-designer/FLOW_DESIGNER_REFERENCE.md
+
+TECH STACK: This app is built with Vue.js, Vuetify, and Vue Flow. All canvas interactions, form validation, and modal behaviors follow Vue/Vuetify/Vue Flow patterns — apply the rules in /skills/app-selectors/SKILL.md under "Playwright Patterns for This App".
+
+No source discovery needed — the reference document already exists at /tests/flow-designer/FLOW_DESIGNER_REFERENCE.md.
+Read it now and use it as the sole source of selectors for this test.
+
+---
+
+## PHASE 1 — Generate Playwright Test
+
+Create test file:
+tests/flow-designer/{{TEST_FILE}}.spec.ts
+
+Test credentials:
+email=heidi@intnt.ai
+password=testing2026!
+org=Testing2026!
+
+IMPORTANT RULES:
+
+1. ONLY use selectors from the SKILL.md files and /tests/flow-designer/FLOW_DESIGNER_REFERENCE.md.
+2. NEVER guess or invent Vuetify selectors like .v-dialog, .v-dialog--active, .v-overlay, .v-card, etc.
+3. For login, COPY THE CODE VERBATIM from the "Login Flow (copy-paste ready)" block in /skills/app-selectors/SKILL.md.
+   Do NOT rewrite it. Do NOT use input[type="email"], input[type="password"], or any selector not in that block.
+   The correct URL is {{BASE_URL}}/login (with /login — NOT the root URL).
+   The correct selectors are .v-text-field (NOT input[type="email"]) and .organization-card.
+   The login button MUST be: page.getByRole('button', { name: /login/i })
+   The button text is "Login" (ONE word). NEVER use filter({ hasText: /Log In/ }) or /^Log In$/ — those will NEVER match.
+   After login, the app MAY redirect to /?select_org OR directly to the dashboard (if org is remembered).
+   NEVER use waitForURL(/\?select_org/) directly — it times out when the server skips org selection.
+   CORRECT post-login pattern (waitForURL callback gets a URL object — use .pathname or .href, NOT .includes()):
+     await page.waitForURL(url => url.pathname !== '/login', { timeout: 60000 });
+     if (page.url().includes('select_org')) {
+       await page.locator('.organization-card').filter({ hasText: 'Testing2026!' }).click();
+       await page.waitForURL(url => !url.href.includes('select_org'), { timeout: 30000 });
+     }
+4. Selector priority — ALWAYS follow this order:
+   STEP 1: Custom CSS class from SKILL.md or FLOW_DESIGNER_REFERENCE.md.
+   STEP 2: Only if no custom class, use a Vuetify class verified in SKILL.md DOM output.
+   STEP 3: NEVER guess or invent a selector. Use getByRole() or getByText() with exact visible text as a last resort.
+5. TypeScript-safe Playwright only. NEVER invent or guess Playwright API methods.
+   FORBIDDEN: triple_click(), triple_click?.(), doubleClick(), selectText(), clearText(), typeText(), pressKey(),
+              filter({ hasAttribute: ... })
+   CORRECT alternatives:
+   - Fill a field: await input.click(); await input.fill('text');
+   - Press Enter: await input.press('Enter');
+6. Logging rule — MANDATORY FORMAT:
+   BEFORE each step: console.log('📍 Step N: Description');
+   AFTER step assertion succeeds: console.log('✅ PASS: Step N - Description');
+   NEVER print "✅ PASS" before the assertion/action that verifies the step.
+   At the end of the test, include a full summary block:
+     console.log('\n' + '='.repeat(70));
+     console.log('📊 TEST SUMMARY');
+     console.log('='.repeat(70));
+     console.log('✅ Step 1: PASS - Description');
+     console.log('='.repeat(70));
+7. Modal loading states: after a modal/overlay opens, ALWAYS wait for any loading indicator to disappear:
+     await page.locator('.v-overlay--active').locator('text=/loading/i').waitFor({ state: 'hidden', timeout: 20000 }).catch(() => {});
+8. VUETIFY RADIO BUTTONS — v-radio renders as input[type="radio"] in the DOM, NOT as a CSS class ".v-radio".
+   NEVER use locator('v-radio') — that is a Vue component tag, not a valid CSS selector and will never match.
+   CORRECT ways to click a Vuetify radio option:
+     page.getByRole('radio', { name: /Full Sync/ })
+     page.locator('input[type="radio"][aria-label="Full Sync"]')
+     page.locator('label.v-label--clickable').filter({ hasText: /Full Sync/ })
+   The same rule applies to ALL Vuetify component tags: v-select, v-checkbox, v-switch, v-tab, etc.
+9. STRICT MODE RULE — ALWAYS use .first() or .last() on any locator that can match multiple elements.
+   FORBIDDEN without .first()/.last():
+     page.locator('.v-list-item')
+     page.locator('.v-overlay--active .v-list-item')
+   CORRECT: .filter({ hasText: /exact text/ }) or .nth(0) or .first() / .last()
+10. Test timeout: set at least 3 minutes.
+    test.setTimeout(180000);
+    Place this as the FIRST line inside the test() callback.
+
+Steps:
+
+{{STEPS}}
+
+---
+
+## DRAG CONNECTION RULES (MANDATORY for every drag-connect step)
+
+### 1. Zoom normalization — run BEFORE EVERY drag connection
+
+Vue Flow zoom persists between operations. After modal interactions the canvas may be at minimum zoom (20%) where handles are too small. Zoom-out-only silently fails at min zoom — always zoom IN first to a known max, then zoom out.
+
+```typescript
+// Before EVERY drag connection:
+await page.mouse.move(640, 360);
+await page.keyboard.down('Control');
+for (let i = 0; i < 20; i++) { await page.mouse.wheel(0, -100); } // zoom in to max (400%)
+await page.keyboard.up('Control');
+await page.waitForTimeout(200);
+await page.keyboard.down('Control');
+for (let i = 0; i < 10; i++) { await page.mouse.wheel(0, 100); } // zoom out to ~100%
+await page.keyboard.up('Control');
+await page.waitForTimeout(500);
+```
+
+### 2. Re-read canvas transform after zoom
+
+The transform read at canvas open becomes stale after any zoom operation. Any node positioned AFTER the first zoom normalization block MUST re-read the transform immediately before positioning — name each re-read descriptively (tfReply, tfCustom, etc.):
+
+```typescript
+const tfReply = await page.locator('.vue-flow__transformationpane').evaluate(el => {
+  const m = new DOMMatrix((el as HTMLElement).style.transform);
+  return { scale: m.a, tx: m.e, ty: m.f };
+});
+const targetX = 250 * tfReply.scale + tfReply.tx;
+const targetY = 200 * tfReply.scale + tfReply.ty;
+```
+
+### 3. Drag pattern for handle connections
+
+Use steps: 50 (not 20) and wait 500ms before mouse.up() so Vue Flow registers the hover on the target handle:
+
+```typescript
+const edgesBefore = await page.locator('.vue-flow__edge[data-id]').count();
+
+const sourceHandle = page.locator('.vue-flow__node')
+  .filter({ has: page.locator('.node-container#SOURCE_ID') })
+  .locator('.vue-flow__handle-bottom');
+const targetHandle = page.locator('.vue-flow__node')
+  .filter({ has: page.locator('.node-container#TARGET_ID') })
+  .locator('.vue-flow__handle-top');
+
+const sourceBox = await sourceHandle.boundingBox();
+const targetBox = await targetHandle.boundingBox();
+if (!sourceBox || !targetBox) throw new Error('Handles not found for SOURCE → TARGET');
+
+await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+await page.waitForTimeout(200);
+await page.mouse.down();
+await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 50 });
+await page.waitForTimeout(500);
+await page.mouse.up();
+await page.waitForTimeout(1000);
+
+const edgesAfter = await page.locator('.vue-flow__edge[data-id]').count();
+if (edgesAfter <= edgesBefore) {
+  throw new Error(`Edge SOURCE → TARGET NOT created — before: ${edgesBefore}, after: ${edgesAfter}`);
+}
+```
+
+---
+
+## EXPECTED RESULT
+
+{{EXPECTED_RESULT}}
+
+---
+
+## PHASE 2 — Run and Fix
+
+Run:
+npx playwright test tests/flow-designer/{{TEST_FILE}}.spec.ts --reporter=line
+
+If fails:
+- analyze
+- fix
+- re-run
+
+Repeat until PASS or blocked
