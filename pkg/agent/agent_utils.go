@@ -84,6 +84,7 @@ func outboundMessageForTurn(ts *turnState, content string) bus.OutboundMessage {
 		SessionKey: sessionKey,
 		Scope:      scope,
 		Content:    content,
+		TurnUsage:  ts.usage.snapshot(),
 	}
 }
 

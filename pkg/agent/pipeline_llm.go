@@ -172,6 +172,8 @@ func (p *Pipeline) CallLLM(
 			"tools_json":    formatToolsForLog(exec.providerToolDefs),
 		})
 
+	servedModel := exec.llmModel
+
 	// LLM call closure with fallback support
 	callLLM := func(
 		messagesForCall []providers.Message,
@@ -268,6 +270,9 @@ func (p *Pipeline) CallLLM(
 			}
 			if fbErr != nil {
 				return nil, fbErr
+			}
+			if fbResult.Model != "" {
+				servedModel = fbResult.Model
 			}
 			if fbResult.Provider != "" && len(fbResult.Attempts) > 0 {
 				logger.InfoCF(
@@ -505,6 +510,10 @@ func (p *Pipeline) CallLLM(
 				"error":     err.Error(),
 			})
 		return ControlBreak, fmt.Errorf("LLM call failed after retries: %w", err)
+	}
+
+	if exec.response != nil {
+		ts.usage.add(exec.response.Usage, servedModel)
 	}
 
 	// AfterLLM hook

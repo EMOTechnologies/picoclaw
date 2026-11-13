@@ -23,10 +23,14 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	turnCtx, turnCancel := context.WithCancel(ctx)
 	defer turnCancel()
 	ts.setTurnCancel(turnCancel)
+	if ts.usage == nil {
+		ts.usage = turnUsageFromContext(ctx)
+	}
 
 	// Inject turnState and AgentLoop into context so tools (e.g. spawn) can retrieve them.
 	turnCtx = withTurnState(turnCtx, ts)
 	turnCtx = WithAgentLoop(turnCtx, al)
+	turnCtx = withBackgroundTracking(turnCtx)
 
 	al.registerActiveTurn(ts)
 	defer al.clearActiveTurn(ts)

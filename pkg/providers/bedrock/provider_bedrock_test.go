@@ -607,6 +607,31 @@ func TestIsSSOTokenError(t *testing.T) {
 	}
 }
 
+func TestParseResponse_IncludesCacheTokensInPromptTokens(t *testing.T) {
+	output := &bedrockruntime.ConverseOutput{
+		Output: &types.ConverseOutputMemberMessage{
+			Value: types.Message{
+				Role:    types.ConversationRoleAssistant,
+				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: "ok"}},
+			},
+		},
+		StopReason: types.StopReasonEndTurn,
+		Usage: &types.TokenUsage{
+			InputTokens:           aws.Int32(10),
+			OutputTokens:          aws.Int32(20),
+			CacheReadInputTokens:  aws.Int32(1000),
+			CacheWriteInputTokens: aws.Int32(100),
+		},
+	}
+
+	resp, err := parseResponse(output)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1110, resp.Usage.PromptTokens)
+	assert.Equal(t, 20, resp.Usage.CompletionTokens)
+	assert.Equal(t, 1130, resp.Usage.TotalTokens)
+}
+
 // mockStreamReader implements bedrockruntime.ConverseStreamOutputReader for testing.
 type mockStreamReader struct {
 	ch  chan types.ConverseStreamOutput
@@ -920,4 +945,30 @@ func TestBuildConverseParams_KeepsTemperatureForSupportedModel(t *testing.T) {
 	require.NotNil(t, params.inferenceConfig)
 	require.NotNil(t, params.inferenceConfig.Temperature)
 	assert.InDelta(t, 0.7, float64(*params.inferenceConfig.Temperature), 0.0001)
+}
+
+func TestParseStreamResponse_IncludesCacheTokensInPromptTokens(t *testing.T) {
+	stream := newMockStream([]types.ConverseStreamOutput{
+		&types.ConverseStreamOutputMemberMessageStop{
+			Value: types.MessageStopEvent{StopReason: types.StopReasonEndTurn},
+		},
+		&types.ConverseStreamOutputMemberMetadata{
+			Value: types.ConverseStreamMetadataEvent{
+				Usage: &types.TokenUsage{
+					InputTokens:           aws.Int32(10),
+					OutputTokens:          aws.Int32(20),
+					CacheReadInputTokens:  aws.Int32(1000),
+					CacheWriteInputTokens: aws.Int32(100),
+				},
+			},
+		},
+	})
+
+	resp, err := parseStreamResponse(context.Background(), stream, nil)
+
+	require.NoError(t, err)
+	require.NotNil(t, resp.Usage)
+	assert.Equal(t, 1110, resp.Usage.PromptTokens)
+	assert.Equal(t, 20, resp.Usage.CompletionTokens)
+	assert.Equal(t, 1130, resp.Usage.TotalTokens)
 }

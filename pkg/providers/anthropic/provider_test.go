@@ -447,3 +447,22 @@ func createAnthropicTestClient(baseURL, token string) *anthropic.Client {
 	)
 	return &c
 }
+
+func TestParseResponse_IncludesCacheTokensInPromptTokens(t *testing.T) {
+	resp := &anthropic.Message{
+		Content: []anthropic.ContentBlockUnion{},
+		Usage: anthropic.Usage{
+			InputTokens:              10,
+			CacheCreationInputTokens: 100,
+			CacheReadInputTokens:     1000,
+			OutputTokens:             20,
+		},
+	}
+	result := parseResponse(resp)
+	if result.Usage.PromptTokens != 1110 {
+		t.Errorf("PromptTokens = %d, want 1110", result.Usage.PromptTokens)
+	}
+	if result.Usage.TotalTokens != 1130 {
+		t.Errorf("TotalTokens = %d, want 1130", result.Usage.TotalTokens)
+	}
+}

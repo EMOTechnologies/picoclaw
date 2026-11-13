@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/backgroundwork"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tokenizer"
@@ -77,9 +78,18 @@ func (e *CompactionEngine) Compact(ctx context.Context, convID int64, input Comp
 	if input.Force || (tokensBefore > budget && budget > 0) {
 		// Launch async condensed compaction with dedup
 		if _, loaded := e.condensing.LoadOrStore(convID, struct{}{}); !loaded {
+			done := backgroundwork.Begin(ctx)
+			loopCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+			stop := func() bool { return false }
+			if e.shutdownCtx != nil {
+				stop = context.AfterFunc(e.shutdownCtx, cancel)
+			}
 			go func() {
+				defer done()
+				defer stop()
+				defer cancel()
 				defer e.condensing.Delete(convID)
-				e.runCondensedLoop(e.shutdownCtx, convID)
+				e.runCondensedLoop(loopCtx, convID)
 			}()
 		}
 	}

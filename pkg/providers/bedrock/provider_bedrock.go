@@ -410,15 +410,7 @@ func parseStreamResponse(
 			case *types.ConverseStreamOutputMemberMetadata:
 				// Usage metadata
 				if e.Value.Usage != nil {
-					usage = &UsageInfo{
-						PromptTokens:     int(aws.ToInt32(e.Value.Usage.InputTokens)),
-						CompletionTokens: int(aws.ToInt32(e.Value.Usage.OutputTokens)),
-						TotalTokens: int(
-							aws.ToInt32(e.Value.Usage.InputTokens),
-						) + int(
-							aws.ToInt32(e.Value.Usage.OutputTokens),
-						),
-					}
+					usage = usageInfoFromTokenUsage(e.Value.Usage)
 				}
 			}
 		}
@@ -790,11 +782,7 @@ func parseResponse(output *bedrockruntime.ConverseOutput) (*LLMResponse, error) 
 	// Build usage info
 	var usage *UsageInfo
 	if output.Usage != nil {
-		usage = &UsageInfo{
-			PromptTokens:     int(aws.ToInt32(output.Usage.InputTokens)),
-			CompletionTokens: int(aws.ToInt32(output.Usage.OutputTokens)),
-			TotalTokens:      int(aws.ToInt32(output.Usage.InputTokens)) + int(aws.ToInt32(output.Usage.OutputTokens)),
-		}
+		usage = usageInfoFromTokenUsage(output.Usage)
 	}
 
 	return &LLMResponse{
@@ -830,4 +818,18 @@ func isSSOTokenError(err error) bool {
 	}
 
 	return false
+}
+
+// usageInfoFromTokenUsage converts Bedrock token usage, counting cache read and
+// cache write tokens as prompt tokens.
+func usageInfoFromTokenUsage(u *types.TokenUsage) *UsageInfo {
+	promptTokens := int(aws.ToInt32(u.InputTokens)) +
+		int(aws.ToInt32(u.CacheReadInputTokens)) +
+		int(aws.ToInt32(u.CacheWriteInputTokens))
+	completionTokens := int(aws.ToInt32(u.OutputTokens))
+	return &UsageInfo{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+	}
 }
