@@ -605,3 +605,28 @@ func TestIsSSOTokenError(t *testing.T) {
 		})
 	}
 }
+
+func TestParseResponse_IncludesCacheTokensInPromptTokens(t *testing.T) {
+	output := &bedrockruntime.ConverseOutput{
+		Output: &types.ConverseOutputMemberMessage{
+			Value: types.Message{
+				Role:    types.ConversationRoleAssistant,
+				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: "ok"}},
+			},
+		},
+		StopReason: types.StopReasonEndTurn,
+		Usage: &types.TokenUsage{
+			InputTokens:           aws.Int32(10),
+			OutputTokens:          aws.Int32(20),
+			CacheReadInputTokens:  aws.Int32(1000),
+			CacheWriteInputTokens: aws.Int32(100),
+		},
+	}
+
+	resp, err := parseResponse(output)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1110, resp.Usage.PromptTokens)
+	assert.Equal(t, 20, resp.Usage.CompletionTokens)
+	assert.Equal(t, 1130, resp.Usage.TotalTokens)
+}

@@ -64,9 +64,12 @@ func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatI
 		return
 	}
 
+	usage := turnUsageFromContext(ctx)
+	waitForBackgroundUsage(usage, channel)
 	msg := bus.OutboundMessage{
-		Context: bus.NewOutboundContext(channel, chatID, ""),
-		Content: response,
+		Context:   bus.NewOutboundContext(channel, chatID, ""),
+		Content:   response,
+		TurnUsage: usage.snapshot(),
 	}
 	if sessionKey != "" {
 		msg.ContextUsage = computeContextUsage(al.agentForSession(sessionKey), sessionKey)

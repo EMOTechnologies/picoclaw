@@ -113,6 +113,7 @@ func streamPicoClawAI(
 	// Read responses and send webhook callback for each chunk
 	var fullResponse string
 	var messageCount int
+	var usage map[string]any
 	idleTimeout := 3 * time.Minute // Fallback timeout (we have completion marker now)
 	maxWaitTime := 5 * time.Minute // Maximum total wait time
 	startTime := time.Now()
@@ -127,7 +128,7 @@ func streamPicoClawAI(
 					fmt.Sprintf("Max wait time reached for job %s, collected %d messages", jobID, messageCount),
 				)
 				// Send final completion callback
-				sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "")
+				sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "", usage)
 				// Close connection immediately after completion
 				conn.Close()
 				return fullResponse, messageCount, nil
@@ -142,7 +143,7 @@ func streamPicoClawAI(
 		case <-ctx.Done():
 			if fullResponse != "" {
 				logger.InfoC("webhook", fmt.Sprintf("Context canceled for job %s, returning partial response", jobID))
-				sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "")
+				sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "", usage)
 				// Close connection immediately
 				conn.Close()
 				return fullResponse, messageCount, nil
@@ -167,7 +168,7 @@ func streamPicoClawAI(
 						),
 					)
 					// Send final completion callback
-					sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "")
+					sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "", usage)
 					// Close connection immediately after completion
 					conn.Close()
 					return fullResponse, messageCount, nil
@@ -183,7 +184,7 @@ func streamPicoClawAI(
 						"webhook",
 						fmt.Sprintf("Connection closed for job %s, %d messages collected", jobID, messageCount),
 					)
-					sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "")
+					sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "", usage)
 					// Connection already closed by error
 					return fullResponse, messageCount, nil
 				}
@@ -199,6 +200,9 @@ func streamPicoClawAI(
 		case "message.create":
 			// Extract content from payload
 			if payload, ok := msg["payload"].(map[string]any); ok {
+				if u := turnUsageFromPayload(payload); u != nil {
+					usage = u
+				}
 				// Check if this is a thought message (skip it)
 				if thought, ok := payload["thought"].(bool); ok && thought {
 					logger.DebugC("webhook", fmt.Sprintf("Received thought message for job %s (skipping)", jobID))
@@ -241,6 +245,7 @@ func streamPicoClawAI(
 								messageCount,
 								nil,
 								"",
+								usage,
 							); err != nil {
 								logger.ErrorC(
 									"webhook",
@@ -265,6 +270,7 @@ func streamPicoClawAI(
 							messageCount,
 							nil,
 							"waiting_user_input",
+							usage,
 						)
 						conn.Close()
 						return fullResponse, messageCount, nil
@@ -290,6 +296,7 @@ func streamPicoClawAI(
 								messageCount,
 								nil,
 								"",
+								usage,
 							); err != nil {
 								logger.ErrorC(
 									"webhook",
@@ -314,6 +321,7 @@ func streamPicoClawAI(
 							messageCount,
 							nil,
 							"",
+							usage,
 						)
 						conn.Close()
 						return fullResponse, messageCount, nil
@@ -330,6 +338,7 @@ func streamPicoClawAI(
 						messageCount,
 						nil,
 						"",
+						usage,
 					); err != nil {
 						logger.ErrorC(
 							"webhook",
@@ -344,6 +353,13 @@ func streamPicoClawAI(
 					}
 				}
 			}
+		case "message.update":
+			if payload, ok := msg["payload"].(map[string]any); ok {
+				if u := turnUsageFromPayload(payload); u != nil {
+					usage = u
+				}
+			}
+			continue
 		case "typing.start":
 			logger.DebugC("webhook", fmt.Sprintf("AI started typing for job %s", jobID))
 			continue
@@ -362,7 +378,7 @@ func streamPicoClawAI(
 			}
 			logger.ErrorC("webhook", fmt.Sprintf("AI returned error for job %s: %s", jobID, errorMsg))
 			// Send error webhook
-			sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, "", 0, fmt.Errorf("%s", errorMsg), "")
+			sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, "", 0, fmt.Errorf("%s", errorMsg), "", usage)
 			// Close connection immediately after error
 			conn.Close()
 			return "", 0, fmt.Errorf("AI error: %s", errorMsg)
@@ -388,6 +404,7 @@ func sendStreamingWebhook(
 	messageCount int,
 	err error,
 	explicitStatus string,
+	usage map[string]any,
 ) error {
 	message := chunk
 	if isComplete {
@@ -424,6 +441,9 @@ func sendStreamingWebhook(
 	} else {
 		payload["status"] = "streaming"
 	}
+	if usage != nil && payload["status"] != "streaming" {
+		payload["usage"] = usage
+	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -436,6 +456,14 @@ func sendStreamingWebhook(
 	}
 
 	return SendWebhookRequest(req)
+}
+
+func turnUsageFromPayload(payload map[string]any) map[string]any {
+	usage, _ := payload["turn_usage"].(map[string]any)
+	if len(usage) == 0 {
+		return nil
+	}
+	return usage
 }
 
 // checkCompletionMarker checks if the content contains the completion marker

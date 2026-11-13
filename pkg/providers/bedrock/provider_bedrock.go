@@ -573,10 +573,14 @@ func parseResponse(output *bedrockruntime.ConverseOutput) (*LLMResponse, error) 
 	// Build usage info
 	var usage *UsageInfo
 	if output.Usage != nil {
+		promptTokens := int(aws.ToInt32(output.Usage.InputTokens)) +
+			int(aws.ToInt32(output.Usage.CacheReadInputTokens)) +
+			int(aws.ToInt32(output.Usage.CacheWriteInputTokens))
+		completionTokens := int(aws.ToInt32(output.Usage.OutputTokens))
 		usage = &UsageInfo{
-			PromptTokens:     int(aws.ToInt32(output.Usage.InputTokens)),
-			CompletionTokens: int(aws.ToInt32(output.Usage.OutputTokens)),
-			TotalTokens:      int(aws.ToInt32(output.Usage.InputTokens)) + int(aws.ToInt32(output.Usage.OutputTokens)),
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
 		}
 	}
 

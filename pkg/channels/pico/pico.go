@@ -341,6 +341,7 @@ func (c *PicoChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]stri
 		}
 	}
 	setContextUsagePayload(payload, msg.ContextUsage)
+	setTurnUsagePayload(payload, msg.TurnUsage)
 	outMsg := newMessage(TypeMessageCreate, payload)
 
 	if err := c.broadcastToSession(msg.ChatID, outMsg); err != nil {
@@ -356,7 +357,7 @@ func (c *PicoChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]stri
 
 // EditMessage implements channels.MessageEditor.
 func (c *PicoChannel) EditMessage(ctx context.Context, chatID string, messageID string, content string) error {
-	return c.editMessage(ctx, chatID, messageID, content, nil)
+	return c.editMessage(ctx, chatID, messageID, content, nil, nil)
 }
 
 // DeleteMessage implements channels.MessageDeleter.
@@ -437,7 +438,10 @@ func (c *PicoChannel) FinalizeToolFeedbackMessage(ctx context.Context, msg bus.O
 	if !outboundMessageFinalizesTrackedToolFeedback(msg) {
 		return nil, false
 	}
-	return c.finalizeTrackedToolFeedbackMessage(ctx, msg.ChatID, msg.Content, c.editMessage, msg.ContextUsage)
+	editFn := func(ctx context.Context, chatID, messageID, content string, contextUsage *bus.ContextUsage) error {
+		return c.editMessage(ctx, chatID, messageID, content, contextUsage, msg.TurnUsage)
+	}
+	return c.finalizeTrackedToolFeedbackMessage(ctx, msg.ChatID, msg.Content, editFn, msg.ContextUsage)
 }
 
 // StartTyping implements channels.TypingCapable.
@@ -1096,6 +1100,18 @@ func setContextUsagePayload(payload map[string]any, u *bus.ContextUsage) {
 	}
 }
 
+func setTurnUsagePayload(payload map[string]any, u *bus.TurnUsage) {
+	if u == nil {
+		return
+	}
+	payload["turn_usage"] = map[string]any{
+		"input_tokens":  u.InputTokens,
+		"output_tokens": u.OutputTokens,
+		"total_tokens":  u.TotalTokens,
+		"model":         u.Model,
+	}
+}
+
 func picoToolCallsPayload(msg bus.OutboundMessage) ([]utils.VisibleToolCall, bool) {
 	raw := strings.TrimSpace(msg.Context.Raw[PayloadKeyToolCalls])
 	if raw == "" {
@@ -1115,12 +1131,14 @@ func (c *PicoChannel) editMessage(
 	messageID string,
 	content string,
 	contextUsage *bus.ContextUsage,
+	turnUsage *bus.TurnUsage,
 ) error {
 	payload := map[string]any{
 		"message_id": messageID,
 		"content":    content,
 	}
 	setContextUsagePayload(payload, contextUsage)
+	setTurnUsagePayload(payload, turnUsage)
 	outMsg := newMessage(TypeMessageUpdate, payload)
 	return c.broadcastToSession(chatID, outMsg)
 }

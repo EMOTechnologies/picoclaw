@@ -70,6 +70,13 @@ type ContextUsage struct {
 	UsedPercent      int `json:"used_percent"`       // 0-100
 }
 
+type TurnUsage struct {
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+	TotalTokens  int    `json:"total_tokens"`
+	Model        string `json:"model,omitempty"`
+}
+
 type OutboundMessage struct {
 	Channel          string         `json:"channel"`
 	ChatID           string         `json:"chat_id"`
@@ -80,6 +87,7 @@ type OutboundMessage struct {
 	Content          string         `json:"content"`
 	ReplyToMessageID string         `json:"reply_to_message_id,omitempty"`
 	ContextUsage     *ContextUsage  `json:"context_usage,omitempty"`
+	TurnUsage        *TurnUsage     `json:"turn_usage,omitempty"`
 }
 
 // MediaPart describes a single media attachment to send.
