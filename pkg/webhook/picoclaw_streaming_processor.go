@@ -168,7 +168,18 @@ func streamPicoClawAI(
 						),
 					)
 					// Send final completion callback
-					sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "", usage)
+					sendStreamingWebhook(
+						webhookURL,
+						jobID,
+						sessionID,
+						"",
+						true,
+						fullResponse,
+						messageCount,
+						nil,
+						"",
+						usage,
+					)
 					// Close connection immediately after completion
 					conn.Close()
 					return fullResponse, messageCount, nil
@@ -184,7 +195,18 @@ func streamPicoClawAI(
 						"webhook",
 						fmt.Sprintf("Connection closed for job %s, %d messages collected", jobID, messageCount),
 					)
-					sendStreamingWebhook(webhookURL, jobID, sessionID, "", true, fullResponse, messageCount, nil, "", usage)
+					sendStreamingWebhook(
+						webhookURL,
+						jobID,
+						sessionID,
+						"",
+						true,
+						fullResponse,
+						messageCount,
+						nil,
+						"",
+						usage,
+					)
 					// Connection already closed by error
 					return fullResponse, messageCount, nil
 				}

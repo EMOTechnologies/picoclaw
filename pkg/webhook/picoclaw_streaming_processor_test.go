@@ -80,7 +80,11 @@ func TestStreamPicoClawAI_TerminalCallbacksCarryLatestTurnUsage(t *testing.T) {
 		wantStatus   string
 	}{
 		{name: "completed", finalContent: "scraped data\n" + completionMarker, wantStatus: "completed"},
-		{name: "waiting user input", finalContent: "enter OTP\n" + waitingUserInputMarker, wantStatus: "waiting_user_input"},
+		{
+			name:         "waiting user input",
+			finalContent: "enter OTP\n" + waitingUserInputMarker,
+			wantStatus:   "waiting_user_input",
+		},
 	}
 
 	for _, tt := range tests {
