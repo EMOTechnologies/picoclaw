@@ -15,6 +15,11 @@ import (
 )
 
 func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipeline) (turnResult, error) {
+	if ts != nil && ts.agent != nil {
+		modelMu := ts.agent.modelStateMutex()
+		modelMu.RLock()
+		defer modelMu.RUnlock()
+	}
 	turnCtx, turnCancel := context.WithCancel(ctx)
 	defer turnCancel()
 	ts.setTurnCancel(turnCancel)
@@ -32,14 +37,33 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 
 	turnStatus := TurnEndStatusCompleted
 	defer func() {
+		attemptedSkills := ts.attemptedSkillsSnapshot()
+		skillContextSnapshots := ts.skillContextSnapshotsSnapshot()
+		finalSuccessfulPath := []string(nil)
+		if turnStatus == TurnEndStatusCompleted {
+			if latest := ts.latestSkillContextSnapshot(); len(latest) > 0 {
+				finalSuccessfulPath = latest
+			} else {
+				finalSuccessfulPath = append([]string(nil), attemptedSkills...)
+			}
+		}
 		al.emitEvent(
 			runtimeevents.KindAgentTurnEnd,
 			ts.eventMeta("runTurn", "turn.end"),
 			TurnEndPayload{
-				Status:          turnStatus,
-				Iterations:      ts.currentIteration(),
-				Duration:        time.Since(ts.startedAt),
-				FinalContentLen: ts.finalContentLen(),
+				Status:                turnStatus,
+				Workspace:             ts.workspace,
+				Iterations:            ts.currentIteration(),
+				Duration:              time.Since(ts.startedAt),
+				FinalContentLen:       ts.finalContentLen(),
+				UserMessage:           ts.userMessage,
+				FinalContent:          ts.finalContentSnapshot(),
+				ActiveSkills:          append([]string(nil), ts.activeSkills...),
+				AttemptedSkills:       attemptedSkills,
+				FinalSuccessfulPath:   finalSuccessfulPath,
+				SkillContextSnapshots: skillContextSnapshots,
+				ToolKinds:             ts.toolKindsSnapshot(),
+				ToolExecutions:        ts.toolExecutionsSnapshot(),
 			},
 		)
 	}()
@@ -63,6 +87,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	if err != nil {
 		return turnResult{}, err
 	}
+	defer exec.closeOwnedProviders()
 
 	// Convenience references to exec fields used throughout the turn loop.
 	messages := exec.messages
@@ -131,7 +156,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 
 		// Inject pending steering messages
 		if len(pendingMessages) > 0 {
-			resolvedPending := resolveMediaRefs(pendingMessages, al.mediaStore, maxMediaSize)
+			resolvedPending := resolveMediaRefs(pendingMessages, al.mediaStore, maxMediaSize, 0)
 			totalContentLen := 0
 			for i, pm := range pendingMessages {
 				messages = append(messages, resolvedPending[i])
@@ -200,7 +225,11 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 			if finalContent == "" {
 				finalContent = ts.opts.DefaultResponse
 			}
-			return pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+			result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+			if finalizeErr != nil {
+				turnStatus = TurnEndStatusError
+			}
+			return result, finalizeErr
 		case ControlToolLoop:
 			// Execute tools via Pipeline
 			toolCtrl := pipeline.ExecuteTools(ctx, turnCtx, ts, exec, iteration)
@@ -227,7 +256,11 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 				if exec.allResponsesHandled {
 					finalContent = ""
 				}
-				return pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+				result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+				if finalizeErr != nil {
+					turnStatus = TurnEndStatusError
+				}
+				return result, finalizeErr
 			}
 		}
 	}
@@ -251,7 +284,11 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 		return al.abortTurn(ts)
 	}
 
-	return pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+	result, err := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+	if err != nil {
+		turnStatus = TurnEndStatusError
+	}
+	return result, err
 }
 
 func (al *AgentLoop) abortTurn(ts *turnState) (turnResult, error) {
@@ -334,6 +371,9 @@ func (al *AgentLoop) askSideQuestion(
 	if agent == nil {
 		return "", fmt.Errorf("askSideQuestion: no agent available for /btw")
 	}
+	modelMu := agent.modelStateMutex()
+	modelMu.RLock()
+	defer modelMu.RUnlock()
 
 	question = strings.TrimSpace(question)
 	if question == "" {
@@ -342,6 +382,11 @@ func (al *AgentLoop) askSideQuestion(
 
 	if opts != nil {
 		normalizeProcessOptionsInPlace(opts)
+		resolved, err := resolveTurnProfileOptions(al.GetConfig(), *opts)
+		if err != nil {
+			return "", err
+		}
+		*opts = resolved
 	}
 
 	var media []string
@@ -368,19 +413,38 @@ func (al *AgentLoop) askSideQuestion(
 		}
 	}
 
-	messages := agent.ContextBuilder.BuildMessages(
-		history,
-		summary,
-		question,
-		media,
-		channel,
-		chatID,
-		senderID,
-		senderDisplayName,
-	)
+	var promptReq PromptBuildRequest
+	if opts == nil {
+		promptReq = PromptBuildRequest{
+			History:           history,
+			Summary:           summary,
+			CurrentMessage:    question,
+			Media:             append([]string(nil), media...),
+			Channel:           channel,
+			ChatID:            chatID,
+			SenderID:          senderID,
+			SenderDisplayName: senderDisplayName,
+		}
+	} else {
+		promptReq = promptBuildRequestForProcessOptions(
+			agent,
+			*opts,
+			history,
+			summary,
+			question,
+			media,
+		)
+	}
+	promptReq.SuppressToolUseRule = true
+	promptReq.ToolUseFallback = false
+	messages := agent.ContextBuilder.BuildMessagesFromPrompt(promptReq)
 
 	maxMediaSize := al.GetConfig().Agents.Defaults.GetMaxMediaSize()
-	messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize)
+	currentTurnStart := len(messages)
+	if strings.TrimSpace(question) != "" || len(media) > 0 {
+		currentTurnStart = len(messages) - 1
+	}
+	messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize, currentTurnStart)
 
 	activeCandidates, activeModel, usedLight := al.selectCandidates(agent, question, messages)
 	selectedModelName := sideQuestionModelName(agent, usedLight)
@@ -392,6 +456,7 @@ func (al *AgentLoop) askSideQuestion(
 	}
 
 	hookModelChanged := false
+	sideSuppressReasoning := false
 	callProvider := func(
 		ctx context.Context,
 		candidate providers.FallbackCandidate,
@@ -399,7 +464,15 @@ func (al *AgentLoop) askSideQuestion(
 		forceModel bool,
 		callMessages []providers.Message,
 	) (*providers.LLMResponse, error) {
-		provider, providerModel, cleanup, err := al.isolatedSideQuestionProvider(agent, selectedModelName, candidate)
+		baseModelName := selectedModelName
+		if forceModel && strings.TrimSpace(model) != "" {
+			baseModelName = model
+		}
+		provider, providerModel, modelCfg, cleanup, err := al.isolatedSideQuestionProvider(
+			agent,
+			baseModelName,
+			candidate,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -408,10 +481,12 @@ func (al *AgentLoop) askSideQuestion(
 			model = providerModel
 		}
 		callOpts := llmOpts
-		if _, exists := callOpts["thinking_level"]; !exists && agent.ThinkingLevel != ThinkingOff {
-			if tc, ok := provider.(providers.ThinkingCapable); ok && tc.SupportsThinking() {
+		settings := thinkingSettingsFromModelConfig(modelCfg)
+		sideSuppressReasoning = shouldSuppressReasoningFor(settings)
+		if _, exists := callOpts["thinking_level"]; !exists {
+			if settings.configured {
 				callOpts = shallowCloneLLMOptions(llmOpts)
-				callOpts["thinking_level"] = string(agent.ThinkingLevel)
+				applyThinkingOption(callOpts, provider, settings, false, agent.ID)
 			}
 		}
 		return provider.Chat(ctx, callMessages, nil, model, callOpts)
@@ -445,6 +520,7 @@ func (al *AgentLoop) askSideQuestion(
 				llmModel = llmReq.Model
 				messages = llmReq.Messages
 				llmOpts = llmReq.Options
+				delete(llmOpts, "native_search")
 			}
 		case HookActionAbortTurn:
 			reason := decision.Reason
@@ -469,18 +545,11 @@ func (al *AgentLoop) askSideQuestion(
 
 	callSideLLM := func(callMessages []providers.Message) (*providers.LLMResponse, error) {
 		if len(activeCandidates) > 1 && al.fallback != nil {
-			fbResult, err := al.fallback.Execute(
+			fbResult, err := al.fallback.ExecuteCandidate(
 				ctx,
 				activeCandidates,
-				func(ctx context.Context, providerName, model string) (*providers.LLMResponse, error) {
-					candidate := providers.FallbackCandidate{Provider: providerName, Model: model}
-					for _, activeCandidate := range activeCandidates {
-						if activeCandidate.Provider == providerName && activeCandidate.Model == model {
-							candidate = activeCandidate
-							break
-						}
-					}
-					return callProvider(ctx, candidate, model, false, callMessages)
+				func(ctx context.Context, candidate providers.FallbackCandidate) (*providers.LLMResponse, error) {
+					return callProvider(ctx, candidate, candidate.Model, false, callMessages)
 				},
 			)
 			if err != nil {
@@ -553,6 +622,11 @@ func (al *AgentLoop) askSideQuestion(
 			return "", fmt.Errorf("hook aborted turn during after_llm: %s", reason)
 		}
 	}
+	if sideSuppressReasoning {
+		resp.Reasoning = ""
+		resp.ReasoningContent = ""
+		resp.ReasoningDetails = nil
+	}
 
 	return sideQuestionResponseContent(resp), nil
 }
@@ -561,14 +635,14 @@ func (al *AgentLoop) isolatedSideQuestionProvider(
 	agent *AgentInstance,
 	baseModelName string,
 	candidate providers.FallbackCandidate,
-) (providers.LLMProvider, string, func(), error) {
+) (providers.LLMProvider, string, *config.ModelConfig, func(), error) {
 	if agent == nil {
-		return nil, "", func() {}, fmt.Errorf("isolatedSideQuestionProvider: no agent available for /btw")
+		return nil, "", nil, func() {}, fmt.Errorf("isolatedSideQuestionProvider: no agent available for /btw")
 	}
 
 	modelCfg, err := al.sideQuestionModelConfig(agent, baseModelName, candidate)
 	if err != nil {
-		return nil, "", func() {}, fmt.Errorf("isolatedSideQuestionProvider: %w", err)
+		return nil, "", nil, func() {}, fmt.Errorf("isolatedSideQuestionProvider: %w", err)
 	}
 
 	factory := al.providerFactory
@@ -577,13 +651,13 @@ func (al *AgentLoop) isolatedSideQuestionProvider(
 	}
 	provider, modelID, err := factory(modelCfg)
 	if err != nil {
-		return nil, "", func() {}, fmt.Errorf("isolatedSideQuestionProvider: %w", err)
+		return nil, "", nil, func() {}, fmt.Errorf("isolatedSideQuestionProvider: %w", err)
 	}
 
 	cleanup := func() {
 		closeProviderIfStateful(provider)
 	}
-	return provider, modelID, cleanup, nil
+	return provider, modelID, modelCfg, cleanup, nil
 }
 
 func (al *AgentLoop) sideQuestionModelConfig(
@@ -594,19 +668,48 @@ func (al *AgentLoop) sideQuestionModelConfig(
 	if agent == nil {
 		return nil, fmt.Errorf("sideQuestionModelConfig: no agent available for /btw")
 	}
+	if candidate.ConfigIndex > 0 {
+		if modelCfg, err := resolvedCandidateModelConfig(
+			al.GetConfig(),
+			candidate,
+			agent.Workspace,
+		); err == nil {
+			return modelCfg, nil
+		}
+	}
 
-	// If candidate has an identity key, use that
-	if name := modelNameFromIdentityKey(candidate.IdentityKey); name != "" {
-		modelCfg, err := resolvedModelConfig(al.GetConfig(), name, agent.Workspace)
+	if name := modelAliasFromCandidateIdentityKey(candidate.IdentityKey); name != "" {
+		modelCfg, err := resolvedRuntimeModelConfig(al.GetConfig(), name, agent.Workspace)
 		if err == nil {
 			return modelCfg, nil
 		}
 		// Fallback: create a minimal config if lookup fails
 	}
 
+	// Older identity keys used provider/model; keep resolving those by model.
+	if name := modelNameFromIdentityKey(candidate.IdentityKey); name != "" {
+		modelCfg, err := resolvedRuntimeModelConfig(al.GetConfig(), name, agent.Workspace)
+		if err == nil {
+			return modelCfg, nil
+		}
+		// Fallback: create a minimal config if lookup fails
+	}
+
+	if candidate.Provider != "" && candidate.Model != "" {
+		candidateRef := providers.NormalizeProvider(candidate.Provider) + "/" + candidate.Model
+		if modelCfg, err := resolvedRuntimeModelConfig(al.GetConfig(), candidateRef, agent.Workspace); err == nil {
+			return modelCfg, nil
+		}
+		return &config.ModelConfig{
+			ModelName: candidateRef,
+			Model:     candidateRef,
+			Workspace: agent.Workspace,
+		}, nil
+	}
+
 	// Otherwise, clean up the base model name and use it
 	baseModelName = strings.TrimSpace(baseModelName)
-	modelCfg, err := resolvedModelConfig(al.GetConfig(), baseModelName, agent.Workspace)
+	modelCfg, err := resolvedRuntimeModelConfig(al.GetConfig(), baseModelName, agent.Workspace)
 	if err != nil {
 		// Fallback: create a minimal config for test scenarios
 		model := strings.TrimSpace(baseModelName)
@@ -627,8 +730,5 @@ func (al *AgentLoop) sideQuestionModelConfig(
 
 	// If candidate specifies a different provider/model, override
 	clone := *modelCfg
-	if candidate.Provider != "" && candidate.Model != "" {
-		clone.Model = providers.NormalizeProvider(candidate.Provider) + "/" + candidate.Model
-	}
 	return &clone, nil
 }

@@ -181,8 +181,15 @@ func buildParams(
 					blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
 				}
 				for _, tc := range msg.ToolCalls {
+					// Resolve tool name: prefer tc.Name, fallback to tc.Function.Name
+					// (tc.Name/tc.Arguments are json:"-" and may be empty when
+					// history is reloaded from the session store)
+					toolName := tc.Name
+					if toolName == "" && tc.Function != nil {
+						toolName = tc.Function.Name
+					}
 					// Skip tool calls with empty names to avoid API errors
-					if tc.Name == "" {
+					if toolName == "" {
 						continue
 					}
 					args := tc.Arguments
@@ -194,7 +201,7 @@ func buildParams(
 					if args == nil {
 						args = map[string]any{}
 					}
-					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, args, tc.Name))
+					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, args, toolName))
 				}
 				anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(blocks...))
 			} else {
@@ -219,7 +226,7 @@ func buildParams(
 	apiModel := strings.ReplaceAll(model, ".", "-")
 
 	params := anthropic.MessageNewParams{
-		Model:     anthropic.Model(apiModel),
+		Model:     apiModel,
 		Messages:  anthropicMessages,
 		MaxTokens: maxTokens,
 	}
@@ -262,7 +269,9 @@ func applyThinkingConfig(params *anthropic.MessageNewParams, level string) {
 	params.Temperature = anthropic.MessageNewParams{}.Temperature
 
 	if level == "adaptive" {
-		adaptive := anthropic.NewThinkingConfigAdaptiveParam()
+		adaptive := anthropic.ThinkingConfigAdaptiveParam{
+			Display: anthropic.ThinkingConfigAdaptiveDisplaySummarized,
+		}
 		params.Thinking = anthropic.ThinkingConfigParamUnion{OfAdaptive: &adaptive}
 		params.OutputConfig = anthropic.OutputConfigParam{
 			Effort: anthropic.OutputConfigEffortHigh,

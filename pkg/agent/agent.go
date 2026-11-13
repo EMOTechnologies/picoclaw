@@ -55,6 +55,7 @@ type AgentLoop struct {
 	transcriber    asr.Transcriber
 	cmdRegistry    *commands.Registry
 	mcp            mcpRuntime
+	evolution      *evolutionBridge
 	hookRuntime    hookRuntime
 	steering       *steeringQueue
 	pendingSkills  sync.Map
@@ -68,8 +69,14 @@ type AgentLoop struct {
 	activeTurnStates sync.Map
 	subTurnCounter   atomic.Int64
 
-	turnSeq        atomic.Uint64
-	activeRequests sync.WaitGroup
+	turnSeq atomic.Uint64
+
+	// activeReqMu/activeReqCond/activeReqCount replace sync.WaitGroup to
+	// avoid the "WaitGroup is reused before previous Wait has returned" panic
+	// that occurs when Add(1) races with a goroutine-launched Wait().
+	activeReqMu    sync.Mutex
+	activeReqCond  *sync.Cond
+	activeReqCount int
 
 	reloadFunc func() error
 
@@ -78,17 +85,18 @@ type AgentLoop struct {
 
 // processOptions configures how a message is processed
 type processOptions struct {
-	Dispatch                DispatchRequest        // Normalized routed request boundary for this turn
-	SessionKey              string                 // Session identifier for history/context
-	SessionAliases          []string               // Compatibility aliases for the session key
-	Channel                 string                 // Target channel for tool execution
-	ChatID                  string                 // Target chat ID for tool execution
-	MessageID               string                 // Current inbound platform message ID
-	ReplyToMessageID        string                 // Current inbound reply target message ID
-	SenderID                string                 // Current sender ID for dynamic context
-	SenderDisplayName       string                 // Current sender display name for dynamic context
-	UserMessage             string                 // User message content (may include prefix)
-	ForcedSkills            []string               // Skills explicitly requested for this message
+	Dispatch                DispatchRequest // Normalized routed request boundary for this turn
+	SessionKey              string          // Session identifier for history/context
+	SessionAliases          []string        // Compatibility aliases for the session key
+	Channel                 string          // Target channel for tool execution
+	ChatID                  string          // Target chat ID for tool execution
+	MessageID               string          // Current inbound platform message ID
+	ReplyToMessageID        string          // Current inbound reply target message ID
+	SenderID                string          // Current sender ID for dynamic context
+	SenderDisplayName       string          // Current sender display name for dynamic context
+	UserMessage             string          // User message content (may include prefix)
+	ForcedSkills            []string        // Skills explicitly requested for this message
+	TurnProfile             config.EffectiveTurnProfile
 	SystemPromptOverride    string                 // Override the default system prompt (Used by SubTurns)
 	Media                   []string               // media:// refs from inbound message
 	InitialSteeringMessages []providers.Message    // Steering messages from refactor/agent
@@ -116,11 +124,14 @@ const (
 	handledToolResponseSummary = "Requested output delivered via tool attachment."
 	sessionKeyAgentPrefix      = "agent:"
 	pendingTurnPrefix          = "pending-"
+	providerReloadGracePeriod  = 30 * time.Second
 	metadataKeyMessageKind     = "message_kind"
 	metadataKeyToolCalls       = "tool_calls"
+	metadataKeyOutboundKind    = "outbound_kind"
 	messageKindThought         = "thought"
 	messageKindToolFeedback    = "tool_feedback"
 	messageKindToolCalls       = "tool_calls"
+	outboundKindFinal          = "final"
 	metadataKeyAccountID       = "account_id"
 	metadataKeyGuildID         = "guild_id"
 	metadataKeyTeamID          = "team_id"
@@ -182,6 +193,8 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 					continue
 				}
 
+				msg = al.prepareInboundMessageForAgent(ctx, msg)
+
 				// Another turn is already active (or reserved) for this session — enqueue
 				if err := al.enqueueSteeringMessage(sessionKey, agentID, providers.Message{
 					Role:    "user",
@@ -202,7 +215,8 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			// Session claimed — spawn a worker goroutine that acquires a semaphore
 			// slot. The goroutine is spawned immediately so the main loop keeps
 			// draining the inbound channel. The goroutine blocks on the semaphore.
-			go func(m bus.InboundMessage) {
+			go func(m bus.InboundMessage, ph *turnState) {
+				var releaseSession bool
 				// Acquire semaphore slot (blocks if at capacity)
 				select {
 				case al.workerSem <- struct{}{}:
@@ -210,7 +224,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				case <-ctx.Done():
 					// Context canceled while waiting for a slot — clean up the
 					// placeholder to prevent session-level deadlock.
-					al.activeTurnStates.Delete(sessionKey)
+					al.releaseSessionTurnState(sessionKey, nil)
 					return
 				}
 
@@ -219,16 +233,28 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				// completes normally, clearActiveTurn deletes the real turnState and
 				// this becomes a no-op (the key is already gone).
 				defer func() {
+					if releaseSession {
+						// Conditional delete: only remove the entry if it still points
+						// to our placeholder. A new message may have claimed the slot
+						// between the panic and this defer.
+						if actual, ok := al.activeTurnStates.Load(sessionKey); ok {
+							if ts, ok := actual.(*turnState); ok && ts == ph {
+								al.releaseSessionTurnState(sessionKey, ts)
+							}
+						}
+						return
+					}
 					if actual, ok := al.activeTurnStates.Load(sessionKey); ok {
 						if ts, ok := actual.(*turnState); ok && strings.HasPrefix(ts.turnID, pendingTurnPrefix) {
 							// Placeholder still present — runTurn never replaced it.
-							al.activeTurnStates.Delete(sessionKey)
+							al.releaseSessionTurnState(sessionKey, ts)
 						}
 					}
 				}()
 
 				defer func() {
 					if r := recover(); r != nil {
+						releaseSession = true
 						logger.RecoverPanicNoExit(r)
 						logger.ErrorCF("agent", "Worker goroutine panicked",
 							map[string]any{
@@ -246,7 +272,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				}
 
 				if al.takePendingStop(sessionKey) {
-					al.activeTurnStates.Delete(sessionKey)
+					al.releaseSessionTurnState(sessionKey, nil)
 					target := &continuationTarget{
 						SessionKey: sessionKey,
 						Channel:    m.Channel,
@@ -264,7 +290,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				}
 
 				al.runTurnWithSteering(ctx, m)
-			}(msg)
+			}(msg, placeholder)
 
 			// TODO: Re-enable media cleanup after inbound media is properly consumed by the agent.
 			// Currently disabled because files are deleted before the LLM can access their content.
@@ -303,6 +329,15 @@ func (al *AgentLoop) Close() {
 	if mcpManager != nil {
 		if err := mcpManager.Close(); err != nil {
 			logger.ErrorCF("agent", "Failed to close MCP manager",
+				map[string]any{
+					"error": err.Error(),
+				})
+		}
+	}
+	evolution := al.currentEvolutionBridge()
+	if evolution != nil {
+		if err := evolution.Close(); err != nil {
+			logger.ErrorCF("agent", "Failed to close evolution bridge",
 				map[string]any{
 					"error": err.Error(),
 				})
@@ -351,37 +386,23 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 		return fmt.Errorf("config cannot be nil")
 	}
 
-	// Create new registry with updated config and provider
-	// Wrap in defer/recover to handle any panics gracefully
 	var registry *AgentRegistry
-	var panicErr error
-	done := make(chan struct{}, 1)
-
-	go func() {
+	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.RecoverPanicNoExit(r)
-				panicErr = fmt.Errorf("panic during registry creation: %v", r)
 				logger.ErrorCF("agent", "Panic during registry creation",
 					map[string]any{"panic": r})
+				registry = nil
 			}
-			close(done)
 		}()
-
 		registry = NewAgentRegistry(cfg, provider)
 	}()
-
-	// Wait for completion or context cancellation
-	select {
-	case <-done:
-		if registry == nil {
-			if panicErr != nil {
-				return fmt.Errorf("registry creation failed: %w", panicErr)
-			}
-			return fmt.Errorf("registry creation failed (nil result)")
+	if registry == nil {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("context canceled during registry creation: %w", err)
 		}
-	case <-ctx.Done():
-		return fmt.Errorf("context canceled during registry creation: %w", ctx.Err())
+		return fmt.Errorf("registry creation failed")
 	}
 
 	// Check context again before proceeding
@@ -392,14 +413,29 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	// Ensure shared tools are re-registered on the new registry
 	registerSharedTools(al, cfg, al.bus, registry, provider)
 
+	newEvolution, evolutionErr := newEvolutionBridge(registry, cfg, provider)
+	if evolutionErr != nil {
+		logger.WarnCF("agent", "Failed to reinitialize evolution bridge during reload",
+			map[string]any{"error": evolutionErr.Error()})
+	}
+	if newEvolution != nil {
+		newEvolution.setCurrentCheck(al.isCurrentEvolutionBridge)
+		if err := newEvolution.subscribeRuntimeEvents(al.runtimeEvents.Channel()); err != nil {
+			logger.WarnCF("agent", "Failed to subscribe reloaded evolution bridge to runtime events",
+				map[string]any{"error": err.Error()})
+		}
+	}
+
 	// Atomically swap the config and registry under write lock
 	// This ensures readers see a consistent pair
 	al.mu.Lock()
 	oldRegistry := al.registry
+	oldEvolution := al.evolution
 
 	// Store new values
 	al.cfg = cfg
 	al.registry = registry
+	al.evolution = newEvolution
 
 	// Also update fallback chain with new config; rebuild rate limiter registry.
 	newRL := providers.NewRateLimiterRegistry()
@@ -427,6 +463,12 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 				map[string]any{"error": err.Error()})
 		}
 	}
+	if oldEvolution != nil {
+		if err := oldEvolution.Close(); err != nil {
+			logger.WarnCF("agent", "Failed to close previous evolution bridge during reload",
+				map[string]any{"error": err.Error()})
+		}
+	}
 	if err := al.ensureMCPInitialized(ctx); err != nil {
 		logger.WarnCF("agent", "MCP failed to reinitialize after reload",
 			map[string]any{"error": err.Error()})
@@ -436,17 +478,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	// This prevents blocking readers while closing
 	if oldProvider, ok := extractProvider(oldRegistry); ok {
 		if stateful, ok := oldProvider.(providers.StatefulProvider); ok {
-			// Give in-flight requests a moment to complete
-			// Use a reasonable timeout that balances cleanup vs resource usage
-			select {
-			case <-time.After(100 * time.Millisecond):
-				stateful.Close()
-			case <-ctx.Done():
-				// Context canceled, close immediately but log warning
-				logger.WarnCF("agent", "Context canceled during provider cleanup, forcing close",
-					map[string]any{"error": ctx.Err()})
-				stateful.Close()
-			}
+			al.closeReloadedProvider(ctx, stateful)
 		}
 	}
 
@@ -499,17 +531,22 @@ func (al *AgentLoop) runAgentLoop(
 	opts processOptions,
 ) (string, error) {
 	opts = normalizeProcessOptions(opts)
+	var err error
+	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
+	if err != nil {
+		return "", err
+	}
 
 	// Record last channel for heartbeat notifications (skip internal channels and cli)
 	if opts.Dispatch.Channel() != "" &&
 		opts.Dispatch.ChatID() != "" &&
 		!constants.IsInternalChannel(opts.Dispatch.Channel()) {
 		channelKey := fmt.Sprintf("%s:%s", opts.Dispatch.Channel(), opts.Dispatch.ChatID())
-		if err := al.RecordLastChannel(channelKey); err != nil {
+		if recordErr := al.RecordLastChannel(channelKey); recordErr != nil {
 			logger.WarnCF(
 				"agent",
 				"Failed to record last channel",
-				map[string]any{"error": err.Error()},
+				map[string]any{"error": recordErr.Error()},
 			)
 		}
 	}
@@ -552,7 +589,7 @@ func (al *AgentLoop) runAgentLoop(
 			opts.Dispatch.SessionKey,
 			opts.Dispatch.SessionScope,
 		)
-		al.bus.PublishOutbound(ctx, bus.OutboundMessage{
+		msg := bus.OutboundMessage{
 			Context: outboundContextFromInbound(
 				opts.Dispatch.InboundContext,
 				opts.Dispatch.Channel(),
@@ -564,7 +601,15 @@ func (al *AgentLoop) runAgentLoop(
 			Scope:        scope,
 			Content:      result.finalContent,
 			ContextUsage: computeContextUsage(agent, opts.Dispatch.SessionKey),
-		})
+		}
+		if modelName := strings.TrimSpace(result.modelName); modelName != "" {
+			if msg.Context.Raw == nil {
+				msg.Context.Raw = make(map[string]string, 1)
+			}
+			msg.Context.Raw["model_name"] = modelName
+		}
+		markFinalOutbound(&msg)
+		al.bus.PublishOutbound(ctx, msg)
 	}
 
 	if result.finalContent != "" {

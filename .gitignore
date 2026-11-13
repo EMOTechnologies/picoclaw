@@ -75,3 +75,4 @@ docker/data_gateway/
 docker/vpn/
 
 .omc/
+.worktrees/

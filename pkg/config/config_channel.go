@@ -3,8 +3,11 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/caarlos0/env/v11"
 	"gopkg.in/yaml.v3"
@@ -24,6 +27,7 @@ const (
 	ChannelDingTalk       = "dingtalk"
 	ChannelSlack          = "slack"
 	ChannelMatrix         = "matrix"
+	ChannelDeltaChat      = "deltachat"
 	ChannelLINE           = "line"
 	ChannelOneBot         = "onebot"
 	ChannelQQ             = "qq"
@@ -33,6 +37,8 @@ const (
 	ChannelWhatsApp       = "whatsapp"
 	ChannelWhatsAppNative = "whatsapp_native"
 	ChannelTeamsWebHook   = "teams_webhook"
+	ChannelMQTT           = "mqtt"
+	ChannelSlackWebHook   = "slack_webhook"
 )
 
 func initChannel() {
@@ -237,6 +243,7 @@ func (b Channel) MarshalJSON() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		raw = preserveExplicitDisabledStreaming(raw, b.Settings)
 		settings = raw
 	} else {
 		settings = b.Settings
@@ -248,6 +255,36 @@ func (b Channel) MarshalJSON() ([]byte, error) {
 	// Use type alias to bypass our custom MarshalJSON (infinite recursion)
 	type Alias Channel
 	return json.Marshal((*Alias)(&out))
+}
+
+func preserveExplicitDisabledStreaming(settings, original RawNode) RawNode {
+	if len(original) == 0 || len(settings) == 0 {
+		return settings
+	}
+
+	var originalMap map[string]any
+	if err := json.Unmarshal(original, &originalMap); err != nil {
+		return settings
+	}
+	originalStreaming, ok := originalMap["streaming"].(map[string]any)
+	if !ok || originalStreaming["enabled"] != false {
+		return settings
+	}
+
+	var settingsMap map[string]any
+	if err := json.Unmarshal(settings, &settingsMap); err != nil {
+		return settings
+	}
+	if _, exists := settingsMap["streaming"]; exists {
+		return settings
+	}
+	settingsMap["streaming"] = map[string]any{"enabled": false}
+
+	data, err := json.Marshal(settingsMap)
+	if err != nil {
+		return settings
+	}
+	return data
 }
 
 // MarshalYAML implements yaml.ValueMarshaler for Channel.
@@ -620,6 +657,8 @@ func filterSecureFields(r RawNode, secureFields map[string]struct{}) RawNode {
 // channelSettingsFactory maps channel type to a zero-value prototype of the
 // corresponding Settings struct. InitChannelList uses reflect.New to create
 // fresh instances, avoiding repeated closure boilerplate.
+var channelSettingsMu sync.RWMutex
+
 var channelSettingsFactory = map[string]any{
 	ChannelPico:           (PicoSettings{}),
 	ChannelPicoClient:     (PicoClientSettings{}),
@@ -631,6 +670,7 @@ var channelSettingsFactory = map[string]any{
 	ChannelDingTalk:       (DingTalkSettings{}),
 	ChannelSlack:          (SlackSettings{}),
 	ChannelMatrix:         (MatrixSettings{}),
+	ChannelDeltaChat:      (DeltaChatSettings{}),
 	ChannelLINE:           (LINESettings{}),
 	ChannelOneBot:         (OneBotSettings{}),
 	ChannelQQ:             (QQSettings{}),
@@ -640,12 +680,28 @@ var channelSettingsFactory = map[string]any{
 	ChannelWhatsApp:       (WhatsAppSettings{}),
 	ChannelWhatsAppNative: (WhatsAppSettings{}),
 	ChannelTeamsWebHook:   (TeamsWebhookSettings{}),
+	ChannelMQTT:           (MQTTSettings{}),
+	ChannelSlackWebHook:   (SlackWebhookSettings{}),
+}
+
+// RegisterChannelSettings registers a settings struct prototype for a custom
+// channel type. External packages (out-of-tree channels registered via
+// channels.RegisterFactory) call this from an init() so their channel type
+// passes config validation (isValidChannelType) and its settings block decodes
+// into the right struct (newChannelSettings). The prototype must be a struct
+// value, e.g. RegisterChannelSettings("my_channel", MyChannelSettings{}).
+func RegisterChannelSettings(channelType string, prototype any) {
+	channelSettingsMu.Lock()
+	defer channelSettingsMu.Unlock()
+	channelSettingsFactory[channelType] = prototype
 }
 
 // newChannelSettings creates a fresh zero-value pointer for the given channel type.
 // Returns nil if the type is not registered.
 func newChannelSettings(channelType string) any {
+	channelSettingsMu.RLock()
 	proto, ok := channelSettingsFactory[channelType]
+	channelSettingsMu.RUnlock()
 	if !ok {
 		return nil
 	}
@@ -654,7 +710,9 @@ func newChannelSettings(channelType string) any {
 
 // isValidChannelType returns true if the channel type is a known, registered type.
 func isValidChannelType(channelType string) bool {
+	channelSettingsMu.RLock()
 	_, ok := channelSettingsFactory[channelType]
+	channelSettingsMu.RUnlock()
 	return ok
 }
 
@@ -692,6 +750,10 @@ func InitChannelList(channels ChannelsConfig) error {
 			if err := env.Parse(target); err != nil {
 				// Non-fatal: some env vars may not apply
 			}
+			applyTelegramStreamingEnvCompat(target)
+			if err := validateChannelStreamingConfig(name, target); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -700,5 +762,50 @@ func InitChannelList(channels ChannelsConfig) error {
 		return err
 	}
 
+	return nil
+}
+
+func applyTelegramStreamingEnvCompat(target any) {
+	settings, ok := target.(*TelegramSettings)
+	if !ok || settings == nil {
+		return
+	}
+
+	if raw, ok := os.LookupEnv("PICOCLAW_CHANNELS_TELEGRAM_STREAMING_ENABLED"); ok {
+		if value, err := strconv.ParseBool(raw); err == nil {
+			settings.Streaming.Enabled = value
+		}
+	}
+	if raw, ok := os.LookupEnv("PICOCLAW_CHANNELS_TELEGRAM_STREAMING_THROTTLE_SECONDS"); ok {
+		if value, err := strconv.Atoi(raw); err == nil {
+			settings.Streaming.ThrottleSeconds = value
+		}
+	}
+	if raw, ok := os.LookupEnv("PICOCLAW_CHANNELS_TELEGRAM_STREAMING_MIN_GROWTH_CHARS"); ok {
+		if value, err := strconv.Atoi(raw); err == nil {
+			settings.Streaming.MinGrowthChars = value
+		}
+	}
+}
+
+func validateChannelStreamingConfig(channelName string, target any) error {
+	var streaming StreamingConfig
+	switch settings := target.(type) {
+	case *PicoSettings:
+		streaming = settings.Streaming
+	case *TelegramSettings:
+		streaming = settings.Streaming
+	case *WeComSettings:
+		streaming = settings.Streaming
+	default:
+		return nil
+	}
+
+	if streaming.ThrottleSeconds < 0 {
+		return fmt.Errorf("channel %q streaming.throttle_seconds must be >= 0", channelName)
+	}
+	if streaming.MinGrowthChars < 0 {
+		return fmt.Errorf("channel %q streaming.min_growth_chars must be >= 0", channelName)
+	}
 	return nil
 }

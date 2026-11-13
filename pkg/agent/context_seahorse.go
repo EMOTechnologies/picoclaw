@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -19,6 +20,7 @@ import (
 type seahorseContextManager struct {
 	engine   *seahorse.Engine
 	sessions session.SessionStore // for startup bootstrap
+	al       *AgentLoop           // for resolving the agent that owns a session
 }
 
 // newSeahorseContextManager creates a seahorse-backed ContextManager.
@@ -46,6 +48,7 @@ func newSeahorseContextManager(_ json.RawMessage, al *AgentLoop) (ContextManager
 	mgr := &seahorseContextManager{
 		engine:   engine,
 		sessions: agent.Sessions,
+		al:       al,
 	}
 
 	// Register seahorse tools with the agent's tool registry
@@ -159,10 +162,18 @@ func (m *seahorseContextManager) Clear(ctx context.Context, sessionKey string) e
 	if err := m.engine.ClearSession(ctx, sessionKey); err != nil {
 		return err
 	}
-	if m.sessions != nil {
-		m.sessions.SetHistory(sessionKey, []providers.Message{})
-		m.sessions.SetSummary(sessionKey, "")
-		return m.sessions.Save(sessionKey)
+	// The session may belong to a routed (non-default) agent whose JSONL
+	// store differs from the bootstrap store, so clear the owner's store.
+	sessions := m.sessions
+	if m.al != nil {
+		if agent := m.al.agentForSession(sessionKey); agent != nil && agent.Sessions != nil {
+			sessions = agent.Sessions
+		}
+	}
+	if sessions != nil {
+		sessions.SetHistory(sessionKey, []providers.Message{})
+		sessions.SetSummary(sessionKey, "")
+		return sessions.Save(sessionKey)
 	}
 	return nil
 }
@@ -197,8 +208,10 @@ func providerToSeahorseMessage(msg protocoltypes.Message) seahorse.Message {
 	result := seahorse.Message{
 		Role:             msg.Role,
 		Content:          msg.Content,
+		ModelName:        msg.ModelName,
 		ReasoningContent: msg.ReasoningContent,
 		TokenCount:       tokenizer.EstimateMessageTokens(msg),
+		CreatedAt:        normalizeSeahorseMessageCreatedAt(msg.CreatedAt),
 	}
 
 	// Convert ToolCalls → MessageParts
@@ -234,6 +247,13 @@ func providerToSeahorseMessage(msg protocoltypes.Message) seahorse.Message {
 	return result
 }
 
+func normalizeSeahorseMessageCreatedAt(createdAt *time.Time) time.Time {
+	if createdAt == nil || createdAt.IsZero() {
+		return time.Time{}
+	}
+	return createdAt.UTC().Truncate(time.Second)
+}
+
 // seahorseToProviderMessages converts a seahorse.AssembleResult to []providers.Message.
 func seahorseToProviderMessages(result *seahorse.AssembleResult) []protocoltypes.Message {
 	messages := make([]protocoltypes.Message, 0, len(result.Messages))
@@ -243,6 +263,7 @@ func seahorseToProviderMessages(result *seahorse.AssembleResult) []protocoltypes
 		pm := protocoltypes.Message{
 			Role:             msg.Role,
 			Content:          msg.Content,
+			ModelName:        msg.ModelName,
 			ReasoningContent: msg.ReasoningContent,
 		}
 
