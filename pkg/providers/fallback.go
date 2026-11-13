@@ -17,13 +17,22 @@ type FallbackChain struct {
 type FallbackCandidate struct {
 	Provider    string
 	Model       string
+	DisplayName string // optional configured alias/raw model label for persistence/UI
 	RPM         int    // requests per minute; 0 means unrestricted
 	IdentityKey string // optional stable config identity for cooldown/rate limiting
+	ConfigIndex int    // optional 1-based model_list index selected during resolution
+	ConfigKey   string // optional hashed model_list identity, stable across reordering
 }
 
 // StableKey returns the candidate's config-level identity when available,
 // otherwise it falls back to the runtime provider/model key.
 func (c FallbackCandidate) StableKey() string {
+	if configKey := strings.TrimSpace(c.ConfigKey); configKey != "" {
+		if identityKey := strings.TrimSpace(c.IdentityKey); identityKey != "" {
+			return identityKey + "|" + configKey
+		}
+		return configKey
+	}
 	if key := strings.TrimSpace(c.IdentityKey); key != "" {
 		return key
 	}
@@ -32,10 +41,11 @@ func (c FallbackCandidate) StableKey() string {
 
 // FallbackResult contains the successful response and metadata about all attempts.
 type FallbackResult struct {
-	Response *LLMResponse
-	Provider string
-	Model    string
-	Attempts []FallbackAttempt
+	Response    *LLMResponse
+	Provider    string
+	Model       string
+	IdentityKey string
+	Attempts    []FallbackAttempt
 }
 
 // FallbackAttempt records one attempt in the fallback chain.
@@ -85,8 +95,9 @@ func ResolveCandidatesWithLookup(
 		}
 		seen[key] = true
 		candidates = append(candidates, FallbackCandidate{
-			Provider: ref.Provider,
-			Model:    ref.Model,
+			Provider:    ref.Provider,
+			Model:       ref.Model,
+			DisplayName: candidateRaw,
 		})
 	}
 
@@ -115,6 +126,22 @@ func (fc *FallbackChain) Execute(
 	ctx context.Context,
 	candidates []FallbackCandidate,
 	run func(ctx context.Context, provider, model string) (*LLMResponse, error),
+) (*FallbackResult, error) {
+	return fc.ExecuteCandidate(
+		ctx,
+		candidates,
+		func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
+			return run(ctx, candidate.Provider, candidate.Model)
+		},
+	)
+}
+
+// ExecuteCandidate runs the fallback chain and passes the complete candidate
+// to the caller so model-list identity metadata remains available.
+func (fc *FallbackChain) ExecuteCandidate(
+	ctx context.Context,
+	candidates []FallbackCandidate,
+	run func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error),
 ) (*FallbackResult, error) {
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("fallback: no candidates configured")
@@ -178,7 +205,7 @@ func (fc *FallbackChain) Execute(
 
 		// Execute the run function.
 		start := time.Now()
-		resp, err := run(ctx, candidate.Provider, candidate.Model)
+		resp, err := run(ctx, candidate)
 		elapsed := time.Since(start)
 
 		if err == nil {
@@ -187,6 +214,7 @@ func (fc *FallbackChain) Execute(
 			result.Response = resp
 			result.Provider = candidate.Provider
 			result.Model = candidate.Model
+			result.IdentityKey = candidate.StableKey()
 			return result, nil
 		}
 
@@ -256,6 +284,22 @@ func (fc *FallbackChain) ExecuteImage(
 	candidates []FallbackCandidate,
 	run func(ctx context.Context, provider, model string) (*LLMResponse, error),
 ) (*FallbackResult, error) {
+	return fc.ExecuteImageCandidate(
+		ctx,
+		candidates,
+		func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
+			return run(ctx, candidate.Provider, candidate.Model)
+		},
+	)
+}
+
+// ExecuteImageCandidate preserves model-list identity metadata for each image
+// fallback attempt.
+func (fc *FallbackChain) ExecuteImageCandidate(
+	ctx context.Context,
+	candidates []FallbackCandidate,
+	run func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error),
+) (*FallbackResult, error) {
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("image fallback: no candidates configured")
 	}
@@ -298,13 +342,14 @@ func (fc *FallbackChain) ExecuteImage(
 		}
 
 		start := time.Now()
-		resp, err := run(ctx, candidate.Provider, candidate.Model)
+		resp, err := run(ctx, candidate)
 		elapsed := time.Since(start)
 
 		if err == nil {
 			result.Response = resp
 			result.Provider = candidate.Provider
 			result.Model = candidate.Model
+			result.IdentityKey = candidate.StableKey()
 			return result, nil
 		}
 

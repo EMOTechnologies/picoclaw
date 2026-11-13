@@ -3,10 +3,13 @@ package httpapi
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestGeminiProvider_ChatSeparatesThoughtAndToolCall(t *testing.T) {
@@ -212,6 +215,109 @@ func TestGeminiProvider_ChatStreamParsesThoughtTextAndToolCalls(t *testing.T) {
 	}
 }
 
+func TestGeminiProvider_ChatStreamEventsStreamsThoughtBeforeContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, ":streamGenerateContent") {
+			t.Fatalf("path = %s, expected streamGenerateContent endpoint", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("response writer is not flushable")
+		}
+
+		chunk := map[string]any{
+			"candidates": []any{map[string]any{
+				"content": map[string]any{
+					"parts": []any{
+						map[string]any{"text": "think", "thought": true},
+						map[string]any{"text": "answer"},
+					},
+				},
+				"finishReason": "STOP",
+			}},
+		}
+		raw, err := json.Marshal(chunk)
+		if err != nil {
+			t.Fatalf("marshal chunk: %v", err)
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", raw)
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider := NewGeminiProvider("test-key", server.URL, "", "", 0, nil, nil)
+	events := make([]string, 0)
+	resp, err := provider.ChatStreamEvents(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"gemini-2.5-flash",
+		nil,
+		func(chunk StreamChunk) {
+			if chunk.ReasoningContent != "" {
+				events = append(events, "reasoning:"+chunk.ReasoningContent)
+			}
+			if chunk.Content != "" {
+				events = append(events, "content:"+chunk.Content)
+			}
+		},
+	)
+	if err != nil {
+		t.Fatalf("ChatStreamEvents() error = %v", err)
+	}
+	if resp.Content != "answer" {
+		t.Fatalf("Content = %q, want %q", resp.Content, "answer")
+	}
+	if resp.ReasoningContent != "think" {
+		t.Fatalf("ReasoningContent = %q, want %q", resp.ReasoningContent, "think")
+	}
+	want := []string{"reasoning:think", "content:answer"}
+	if len(events) != len(want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Fatalf("events = %#v, want %#v", events, want)
+		}
+	}
+}
+
+type geminiBlockingReadCloser struct {
+	closeOnce sync.Once
+	closed    chan struct{}
+}
+
+func newGeminiBlockingReadCloser() *geminiBlockingReadCloser {
+	return &geminiBlockingReadCloser{closed: make(chan struct{})}
+}
+
+func (r *geminiBlockingReadCloser) Read([]byte) (int, error) {
+	<-r.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *geminiBlockingReadCloser) Close() error {
+	r.closeOnce.Do(func() {
+		close(r.closed)
+	})
+	return nil
+}
+
+func TestGeminiStreamingReadIdleTimeoutClosesStalledBody(t *testing.T) {
+	body := newGeminiBlockingReadCloser()
+	wrapped := withGeminiStreamingReadIdleTimeout(body, 10*time.Millisecond)
+
+	_, err := wrapped.Read(make([]byte, 1))
+	if err == nil {
+		t.Fatal("expected stalled stream read to return an error")
+	}
+	if !strings.Contains(err.Error(), "gemini stream idle timeout") {
+		t.Fatalf("error = %v, want gemini stream idle timeout", err)
+	}
+}
+
 func TestGeminiProvider_ChatStreamSkipsEmptyDataFrames(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -347,7 +453,7 @@ func TestGeminiProvider_ChatStreamReturnsErrorOnInvalidDataFrame(t *testing.T) {
 	}
 }
 
-func TestGeminiProvider_BuildRequestBody_UsesCamelCaseThoughtSignatureOnly(t *testing.T) {
+func TestGeminiProvider_BuildRequestBody_SetsBothThoughtSignatureFormats(t *testing.T) {
 	provider := NewGeminiProvider("test-key", "https://example.com/v1beta", "", "", 0, nil, nil)
 
 	body := provider.buildRequestBody(
@@ -378,8 +484,12 @@ func TestGeminiProvider_BuildRequestBody_UsesCamelCaseThoughtSignatureOnly(t *te
 	if !strings.Contains(jsonBody, `"thoughtSignature":"sig-1"`) {
 		t.Fatalf("request body = %s, expected camelCase thoughtSignature", jsonBody)
 	}
-	if strings.Contains(jsonBody, `"thought_signature"`) {
-		t.Fatalf("request body = %s, unexpected snake_case thought_signature", jsonBody)
+	if !strings.Contains(jsonBody, `"thought_signature":"sig-1"`) {
+		t.Fatalf(
+			"request body = %s, expected snake_case thought_signature for "+
+				"Gemini 3.5 Flash Agentic compatibility",
+			jsonBody,
+		)
 	}
 }
 

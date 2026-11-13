@@ -47,7 +47,7 @@ The current frontend exposes these major pages and flows:
   - Current built-in flows: OpenAI, Anthropic, and Google Antigravity.
 - `/channels/*`
   - Configure supported channels from a shared catalog.
-  - Current catalog: `weixin`, `telegram`, `discord`, `slack`, `feishu`, `dingtalk`, `line`, `qq`, `onebot`, `wecom`, `whatsapp`, `whatsapp_native`, `pico`, `maixcam`, `matrix`, `irc`.
+  - Current catalog: `weixin`, `telegram`, `discord`, `slack`, `feishu`, `dingtalk`, `line`, `qq`, `onebot`, `wecom`, `whatsapp`, `whatsapp_native`, `pico`, `maixcam`, `matrix`, `irc`, `mqtt`.
   - Includes QR-based binding helpers for WeChat and WeCom.
 - `/agent/skills`
   - Browse built-in, global, and workspace skills.
@@ -55,7 +55,7 @@ The current frontend exposes these major pages and flows:
 - `/agent/tools`
   - View tool availability and enable or disable tool switches through config-backed APIs.
 - `/config`
-  - Edit agent defaults, exec controls, cron controls, heartbeat, device monitoring, launcher networking, and launch-at-login settings.
+  - Edit agent defaults, self-evolution, exec controls, cron controls, heartbeat, device monitoring, launcher networking, and launch-at-login settings.
 - `/logs`
   - View the in-memory gateway log buffer and clear it.
 
@@ -81,6 +81,8 @@ That file currently stores:
 - `port`
 - `public`
 - `allowed_cidrs`
+- `allow_localhost_bypass`
+- `trusted_proxy_cidrs`
 
 If `-port` or `-public` are passed explicitly, the CLI flag wins for that run.
 If they are omitted, stored launcher settings are used.
@@ -152,6 +154,9 @@ When public access is enabled:
 
 - the launcher still protects the dashboard with password login
 - optional `allowed_cidrs` can restrict which client IP ranges may connect
+- `allow_localhost_bypass` defaults to `true`; set it to `false` when same-host proxies or tunnels should not bypass `allowed_cidrs`
+- optional `trusted_proxy_cidrs` can trust specific reverse proxies to supply the original client IP through headers such as `X-Forwarded-For`
+- trusted proxy deployments should overwrite or sanitize forwarding headers such as `X-Forwarded-For` and `X-Real-IP` instead of passing through user-supplied values
 - the gateway host is overridden so remote clients can still use the launcher-managed proxy paths
 
 ## Build And Run

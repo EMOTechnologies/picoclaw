@@ -20,9 +20,13 @@ export interface ModelInfo {
   request_timeout?: number
   thinking_level?: string
   tool_schema_transform?: string
+  streaming?: {
+    enabled?: boolean
+  }
   extra_body?: Record<string, unknown>
   custom_headers?: Record<string, string>
   // Meta
+  enabled: boolean
   available: boolean
   status: "available" | "unconfigured" | "unreachable"
   is_default: boolean
@@ -32,25 +36,48 @@ export interface ModelInfo {
 
 export interface ModelProviderOption {
   id: string
+  display_name?: string
+  icon_slug?: string
+  domain?: string
   default_api_base: string
   empty_api_key_allowed: boolean
   create_allowed: boolean
   default_model_allowed: boolean
+  supports_fetch?: boolean
   default_auth_method?: string
   auth_method_locked?: boolean
+  local?: boolean
+  priority?: number
+  common_models?: string[]
+  aliases?: string[]
 }
 
 interface ModelsListResponse {
   models: ModelInfo[]
   total: number
   default_model: string
+  default_provider: string
+  fallback_chain: string[]
   provider_options: ModelProviderOption[]
 }
 
-interface ModelActionResponse {
+export interface ModelReferenceRename {
+  from: string
+  to: string
+  default: boolean
+  fallback: boolean
+}
+
+export interface ModelActionResponse {
   status: string
   index?: number
   default_model?: string
+  reference_rename?: ModelReferenceRename
+}
+
+export interface DefaultChain {
+  default_model: string
+  fallback_chain: string[]
 }
 
 const BASE_URL = ""
@@ -58,7 +85,13 @@ const BASE_URL = ""
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await launcherFetch(`${BASE_URL}${path}`, options)
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`)
+    let detail = ""
+    try {
+      detail = await res.text()
+    } catch {
+      // ignore
+    }
+    throw new Error(detail || `API error: ${res.status} ${res.statusText}`)
   }
   return res.json() as Promise<T>
 }
@@ -107,4 +140,113 @@ export async function setDefaultModel(
   return response
 }
 
-export type { ModelsListResponse, ModelActionResponse }
+export async function getDefaultChain(): Promise<DefaultChain> {
+  return request<DefaultChain>("/api/models/default-chain")
+}
+
+export async function updateDefaultChain(
+  payload: DefaultChain,
+): Promise<DefaultChain> {
+  return request<DefaultChain>("/api/models/default-chain", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export interface TestModelResponse {
+  success: boolean
+  latency_ms: number
+  status: string
+  error?: string
+}
+
+export async function testModel(index: number): Promise<TestModelResponse> {
+  return request<TestModelResponse>(`/api/models/${index}/test`, {
+    method: "POST",
+  })
+}
+
+export interface TestModelInlineRequest {
+  provider: string
+  model: string
+  api_base?: string
+  api_key?: string
+  auth_method?: string
+  model_index?: number
+}
+
+export async function testModelInline(
+  params: TestModelInlineRequest,
+): Promise<TestModelResponse> {
+  return request<TestModelResponse>("/api/models/test-inline", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  })
+}
+
+export interface UpstreamModel {
+  id: string
+  owned_by?: string
+  extra?: Record<string, unknown>
+}
+
+export interface FetchModelsRequest {
+  provider: string
+  api_key?: string
+  api_base?: string
+  model_index?: number
+}
+
+export interface FetchModelsResponse {
+  models: UpstreamModel[]
+  total: number
+}
+
+export async function fetchUpstreamModels(
+  req: FetchModelsRequest,
+): Promise<FetchModelsResponse> {
+  return request<FetchModelsResponse>("/api/models/fetch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  })
+}
+
+// --- Model Catalog API ---
+
+export interface CatalogModel {
+  id: string
+  owned_by?: string
+  extra?: Record<string, unknown>
+}
+
+export interface CatalogEntry {
+  id: string
+  provider: string
+  api_base: string
+  api_key_mask: string
+  models: CatalogModel[]
+  fetched_at: string
+}
+
+interface CatalogListResponse {
+  entries: CatalogEntry[]
+  total: number
+}
+
+export async function getCatalogs(): Promise<CatalogListResponse> {
+  return request<CatalogListResponse>("/api/models/catalog")
+}
+
+export async function deleteCatalog(id: string): Promise<void> {
+  await request<Record<string, never>>(
+    `/api/models/catalog/${encodeURIComponent(id)}`,
+    {
+      method: "DELETE",
+    },
+  )
+}
+
+export type { ModelsListResponse }

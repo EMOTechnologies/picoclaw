@@ -10,7 +10,45 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
+
+type countingStatefulProvider struct {
+	closeCount int
+}
+
+func (p *countingStatefulProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	options map[string]any,
+) (*providers.LLMResponse, error) {
+	return &providers.LLMResponse{Content: "ok"}, nil
+}
+
+func (p *countingStatefulProvider) GetDefaultModel() string { return "test-model" }
+
+func (p *countingStatefulProvider) Close() { p.closeCount++ }
+
+func TestAgentInstanceCloseClosesSharedStatefulProviderOnce(t *testing.T) {
+	provider := &countingStatefulProvider{}
+	agent := &AgentInstance{
+		Provider:      provider,
+		LightProvider: provider,
+		CandidateProviders: map[string]providers.LLMProvider{
+			"candidate": provider,
+			"runtime":   provider,
+		},
+	}
+
+	if err := agent.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if provider.closeCount != 1 {
+		t.Fatalf("close count = %d, want 1", provider.closeCount)
+	}
+}
 
 func TestNewAgentInstance_UsesDefaultsTemperatureAndMaxTokens(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-instance-test-*")
@@ -423,6 +461,347 @@ func TestPopulateCandidateProviders_ResolvesProtocolPrefix(t *testing.T) {
 	}
 }
 
+func TestLookupModelConfigByRef_BareUsesDefaultProvider(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{Provider: "openrouter"},
+		},
+		ModelList: []*config.ModelConfig{
+			{ModelName: "openai-model", Provider: "openai", Model: "gpt-4o"},
+			{ModelName: "openrouter-model", Provider: "openrouter", Model: "gpt-4o"},
+		},
+	}
+
+	modelCfg := lookupModelConfigByRef(cfg, "gpt-4o", cfg.Agents.Defaults.Provider)
+	if modelCfg == nil || modelCfg.ModelName != "openrouter-model" {
+		t.Fatalf("resolved model = %#v, want openrouter-model", modelCfg)
+	}
+}
+
+func TestResolvePrimaryProviderForAgent_ResolvesRawUsingProviderTemplate(t *testing.T) {
+	workspace := t.TempDir()
+	fallback := &mockProvider{}
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{{
+			ModelName: "openrouter-template",
+			Model:     "openrouter/auto",
+			APIBase:   "https://openrouter.ai/api/v1",
+			APIKeys:   config.SimpleSecureStrings("sk-or-test"),
+		}},
+	}
+
+	resolved := resolvePrimaryProviderForAgent(
+		cfg,
+		workspace,
+		"raw-agent",
+		"openrouter/new-model",
+		fallback,
+	)
+	if resolved == fallback {
+		t.Fatal("raw per-agent primary reused the injected provider")
+	}
+}
+
+func TestResolvePrimaryProviderForCandidateDoesNotReuseFallbackOnInitFailure(t *testing.T) {
+	fallback := &mockProvider{}
+	cfg := &config.Config{ModelList: []*config.ModelConfig{{
+		ModelName: "broken",
+		Provider:  "unsupported-provider",
+		Model:     "model",
+	}}}
+	candidate := providers.FallbackCandidate{
+		Provider:    "unsupported-provider",
+		Model:       "model",
+		DisplayName: "broken",
+		ConfigIndex: 1,
+	}
+
+	resolved := resolvePrimaryProviderForCandidate(cfg, t.TempDir(), "main", candidate, fallback)
+	if resolved == fallback {
+		t.Fatal("provider initialization failure reused injected fallback provider")
+	}
+	_, err := resolved.Chat(context.Background(), nil, nil, candidate.Model, nil)
+	if err == nil {
+		t.Fatal("unavailable provider Chat() error = nil")
+	}
+	classified := providers.ClassifyError(err, candidate.Provider, candidate.Model)
+	if classified == nil || !classified.IsRetriable() {
+		t.Fatalf("classified error = %#v, want retriable failover error", classified)
+	}
+}
+
+func TestResolvePrimaryProviderForCandidatePreservesInjectedProviderForRawModel(t *testing.T) {
+	injected := &mockProvider{}
+	candidate := providers.FallbackCandidate{Provider: "openai", Model: "test-model"}
+
+	resolved := resolvePrimaryProviderForCandidate(
+		&config.Config{},
+		t.TempDir(),
+		"main",
+		candidate,
+		injected,
+	)
+	if resolved != injected {
+		t.Fatal("raw primary model replaced the injected provider")
+	}
+}
+
+func TestProviderForFallbackCandidateRejectsMissingCrossProvider(t *testing.T) {
+	agent := &AgentInstance{CandidateProviders: map[string]providers.LLMProvider{}}
+	activeProvider := &mockProvider{}
+	activeCandidates := []providers.FallbackCandidate{{Provider: "openai", Model: "gpt-4o"}}
+
+	provider, err := providerForFallbackCandidate(
+		agent,
+		activeProvider,
+		activeCandidates,
+		providers.FallbackCandidate{Provider: "openrouter", Model: "new-model"},
+	)
+	if err == nil || provider != nil {
+		t.Fatalf("provider = %T, error = %v, want missing cross-provider error", provider, err)
+	}
+}
+
+func TestResolvedCandidateModelConfigUsesConfigIndex(t *testing.T) {
+	cfg := &config.Config{ModelList: []*config.ModelConfig{
+		{
+			ModelName: "backup",
+			Provider:  "openai",
+			Model:     "gpt-4o",
+			APIBase:   "https://first.example.test/v1",
+			APIKeys:   config.SimpleSecureStrings("sk-first"),
+		},
+		{
+			ModelName: "backup",
+			Provider:  "openai",
+			Model:     "gpt-4o",
+			APIBase:   "https://second.example.test/v1",
+			APIKeys:   config.SimpleSecureStrings("sk-second"),
+		},
+	}}
+	candidate := providers.FallbackCandidate{
+		Provider:    "openai",
+		Model:       "gpt-4o",
+		DisplayName: "backup",
+		IdentityKey: "model_name:backup",
+		ConfigIndex: 2,
+	}
+
+	resolved, err := resolvedCandidateModelConfig(cfg, candidate, t.TempDir())
+	if err != nil {
+		t.Fatalf("resolvedCandidateModelConfig() error = %v", err)
+	}
+	if resolved.APIKey() != "sk-second" || resolved.APIBase != "https://second.example.test/v1" {
+		t.Fatalf("resolved config = %#v, want second duplicate alias entry", resolved)
+	}
+}
+
+func TestResolvedCandidateModelConfigSurvivesModelListReorder(t *testing.T) {
+	cfg := &config.Config{ModelList: []*config.ModelConfig{
+		{ModelName: "other", Provider: "openai", Model: "other", APIKeys: config.SimpleSecureStrings("sk-other")},
+		{ModelName: "backup", Provider: "openai", Model: "gpt-4o", APIKeys: config.SimpleSecureStrings("sk-backup")},
+	}}
+	candidate, ok := resolveModelCandidate(cfg, "openai", "backup")
+	if !ok {
+		t.Fatal("resolveModelCandidate() did not resolve backup")
+	}
+	cfg.ModelList = []*config.ModelConfig{cfg.ModelList[1], cfg.ModelList[0]}
+
+	resolved, err := resolvedCandidateModelConfig(cfg, candidate, t.TempDir())
+	if err != nil {
+		t.Fatalf("resolvedCandidateModelConfig() error = %v", err)
+	}
+	if resolved.ModelName != "backup" || resolved.APIKey() != "sk-backup" {
+		t.Fatalf("resolved config = %#v, want reordered backup entry", resolved)
+	}
+}
+
+func TestResolvedCandidateModelConfigUsesDefaultProviderForLegacyBareAlias(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{Provider: "anthropic"}},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "primary",
+			Model:     "claude-sonnet-4-5",
+			APIKeys:   config.SimpleSecureStrings("test-key"),
+		}},
+	}
+	candidate, ok := resolveModelCandidate(cfg, "anthropic", "primary")
+	if !ok {
+		t.Fatal("resolveModelCandidate() did not resolve primary")
+	}
+
+	resolved, err := resolvedCandidateModelConfig(cfg, candidate, t.TempDir())
+	if err != nil {
+		t.Fatalf("resolvedCandidateModelConfig() error = %v", err)
+	}
+	if resolved.Provider != "anthropic" || resolved.Model != "claude-sonnet-4-5" {
+		t.Fatalf("resolved provider/model = %q/%q, want anthropic/claude-sonnet-4-5", resolved.Provider, resolved.Model)
+	}
+}
+
+func TestProviderForConfiguredFallbackRejectsMissingProvider(t *testing.T) {
+	primary := providers.FallbackCandidate{Provider: "openai", Model: "primary", ConfigKey: "config:primary"}
+	fallback := providers.FallbackCandidate{Provider: "openai", Model: "backup", ConfigKey: "config:backup"}
+	provider, err := providerForFallbackCandidate(
+		&AgentInstance{CandidateProviders: map[string]providers.LLMProvider{}},
+		&mockProvider{},
+		[]providers.FallbackCandidate{primary, fallback},
+		fallback,
+	)
+	if err == nil || provider != nil {
+		t.Fatalf("provider = %T, error = %v, want configured provider initialization error", provider, err)
+	}
+}
+
+func TestApplyBeforeLLMModelRewriteSwitchesProvider(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{Provider: "openai"}},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "hook-model",
+			Provider:  "anthropic",
+			Model:     "claude-sonnet",
+			APIKeys:   config.SimpleSecureStrings("sk-ant-test"),
+		}},
+	}
+	candidate, ok := resolveModelCandidate(cfg, "openai", "hook-model")
+	if !ok {
+		t.Fatal("resolveModelCandidate() did not resolve hook model")
+	}
+	replacement := &mockProvider{}
+	agent := &AgentInstance{
+		Workspace: t.TempDir(),
+		CandidateProviders: map[string]providers.LLMProvider{
+			candidateProviderKey(candidate): replacement,
+		},
+	}
+	exec := &turnExecution{llmModel: "hook-model", activeProvider: &mockProvider{}}
+	pipeline := &Pipeline{Cfg: cfg}
+
+	if err := pipeline.applyBeforeLLMModelRewrite(&turnState{agent: agent}, exec); err != nil {
+		t.Fatalf("applyBeforeLLMModelRewrite() error = %v", err)
+	}
+	if exec.activeProvider != replacement {
+		t.Fatalf("active provider = %T, want hook-selected candidate provider", exec.activeProvider)
+	}
+	if exec.activeModel != "claude-sonnet" {
+		t.Fatalf("active model = %q, want %q", exec.activeModel, "claude-sonnet")
+	}
+}
+
+func TestResolveRawModelCandidatePreservesSelectedTemplateIndex(t *testing.T) {
+	cfg := &config.Config{ModelList: []*config.ModelConfig{
+		{
+			ModelName: "template",
+			Provider:  "openai",
+			Model:     "gpt-4o",
+			APIKeys:   config.SimpleSecureStrings("sk-shared"),
+		},
+		{
+			ModelName: "template",
+			Provider:  "openai",
+			Model:     "gpt-4o",
+			APIKeys:   config.SimpleSecureStrings("sk-shared"),
+			Enabled:   true,
+		},
+	}}
+
+	candidate, ok := resolveModelCandidate(cfg, "openai", "openai/gpt-4o")
+	if !ok {
+		t.Fatal("resolveModelCandidate() did not resolve raw model")
+	}
+	if candidate.ConfigIndex != 2 {
+		t.Fatalf("ConfigIndex = %d, want enabled template index 2", candidate.ConfigIndex)
+	}
+}
+
+func TestPopulateCandidateProvidersUsesConfigIndexAndRuntimeKey(t *testing.T) {
+	out := map[string]providers.LLMProvider{}
+	cfg := &config.Config{ModelList: []*config.ModelConfig{
+		{
+			ModelName: "backup",
+			Provider:  "openai",
+			Model:     "gpt-4o",
+			APIKeys:   config.SimpleSecureStrings("sk-first"),
+		},
+		{
+			ModelName: "backup",
+			Provider:  "openai",
+			Model:     "gpt-4o",
+			APIKeys:   config.SimpleSecureStrings("sk-second"),
+		},
+	}}
+	candidate := providers.FallbackCandidate{
+		Provider:    "openai",
+		Model:       "gpt-4o",
+		DisplayName: "backup",
+		IdentityKey: "model_name:backup",
+		ConfigIndex: 2,
+	}
+
+	populateCandidateProvidersFromCandidates(cfg, t.TempDir(), []providers.FallbackCandidate{candidate}, out)
+	if out[candidateProviderKey(candidate)] == nil {
+		t.Fatal("candidate provider map is missing exact config-index key")
+	}
+	if out[providers.ModelKey("openai", "gpt-4o")] == nil {
+		t.Fatal("candidate provider map is missing compatibility runtime key")
+	}
+}
+
+func TestPopulateCandidateProvidersFromCandidatesUsesCandidateProvider(t *testing.T) {
+	out := map[string]providers.LLMProvider{}
+	cfg := &config.Config{ModelList: []*config.ModelConfig{
+		{
+			ModelName: "backup",
+			Provider:  "openai",
+			Model:     "shared-model",
+			APIKeys:   config.SimpleSecureStrings("sk-openai"),
+		},
+		{
+			ModelName: "backup",
+			Provider:  "openrouter",
+			Model:     "shared-model",
+			APIKeys:   config.SimpleSecureStrings("sk-openrouter"),
+		},
+	}}
+	candidate := providers.FallbackCandidate{
+		Provider:    "openrouter",
+		Model:       "shared-model",
+		DisplayName: "backup",
+		IdentityKey: "model_name:backup",
+	}
+
+	populateCandidateProvidersFromCandidates(cfg, t.TempDir(), []providers.FallbackCandidate{candidate}, out)
+	if out[providers.ModelKey("openrouter", "shared-model")] == nil {
+		t.Fatal("candidate provider map did not use the already resolved OpenRouter candidate")
+	}
+}
+
+func TestPopulateCandidateProviders_ResolvesRawUsingProviderTemplate(t *testing.T) {
+	workspace := t.TempDir()
+	out := map[string]providers.LLMProvider{}
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{{
+			ModelName: "openrouter-template",
+			Model:     "openrouter/auto",
+			APIBase:   "https://openrouter.ai/api/v1",
+			APIKeys:   config.SimpleSecureStrings("sk-or-test"),
+			Workspace: workspace,
+		}},
+	}
+
+	populateCandidateProvidersFromNames(
+		cfg,
+		workspace,
+		[]string{"openrouter/deepseek/deepseek-v3.2"},
+		out,
+	)
+
+	key := providers.ModelKey("openrouter", "deepseek/deepseek-v3.2")
+	if out[key] == nil {
+		t.Fatalf("expected CandidateProviders[%q] to use the OpenRouter template", key)
+	}
+}
+
 // TestPopulateCandidateProviders_EmptyNamesIsNoop verifies the early-exit
 // path when the names slice is empty.
 func TestPopulateCandidateProviders_EmptyNamesIsNoop(t *testing.T) {
@@ -456,7 +835,7 @@ func TestPopulateCandidateProviders_UnmatchedNameIsSkipped(t *testing.T) {
 	out := map[string]providers.LLMProvider{}
 	cfg := &config.Config{
 		ModelList: []*config.ModelConfig{
-			{ModelName: "my-gpt", Model: "openai/gpt-4o", APIKeys: config.SimpleSecureStrings("key")},
+			{ModelName: "my-gemini", Model: "gemini/gemini-2.5-pro", APIKeys: config.SimpleSecureStrings("key")},
 		},
 	}
 	populateCandidateProvidersFromNames(cfg, t.TempDir(), []string{"nonexistent-model"}, out)
@@ -583,6 +962,102 @@ func TestNewAgentInstance_ReadFileModeSelectsSchema(t *testing.T) {
 	}
 }
 
+// write_file copy names append_file/edit_file only when they are registered.
+func TestNewAgentInstance_WriteFileCopyReflectsAvailableAltTools(t *testing.T) {
+	newCfg := func(editEnabled, appendEnabled bool) *config.Config {
+		return &config.Config{
+			Agents: config.AgentsConfig{
+				Defaults: config.AgentDefaults{
+					Workspace: t.TempDir(),
+					ModelName: "test-model",
+				},
+			},
+			Tools: config.ToolsConfig{
+				WriteFile:  config.ToolConfig{Enabled: true},
+				EditFile:   config.ToolConfig{Enabled: editEnabled},
+				AppendFile: config.ToolConfig{Enabled: appendEnabled},
+			},
+		}
+	}
+
+	writeToolDesc := func(cfg *config.Config) string {
+		agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+		writeTool, ok := agent.Tools.Get("write_file")
+		if !ok {
+			t.Fatal("write_file tool not registered")
+		}
+		return writeTool.Description()
+	}
+
+	t.Run("only write_file exposed", func(t *testing.T) {
+		desc := writeToolDesc(newCfg(false, false))
+		if strings.Contains(desc, "append_file") || strings.Contains(desc, "edit_file") {
+			t.Fatalf("write_file must not reference unavailable tools, got: %q", desc)
+		}
+	})
+
+	t.Run("only append_file exposed", func(t *testing.T) {
+		desc := writeToolDesc(newCfg(false, true))
+		if !strings.Contains(desc, "append_file") {
+			t.Fatalf("expected write_file to reference append_file, got: %q", desc)
+		}
+		if strings.Contains(desc, "edit_file") {
+			t.Fatalf("write_file must not reference disabled edit_file, got: %q", desc)
+		}
+	})
+
+	t.Run("both exposed", func(t *testing.T) {
+		desc := writeToolDesc(newCfg(true, true))
+		if !strings.Contains(desc, "append_file") || !strings.Contains(desc, "edit_file") {
+			t.Fatalf("expected write_file to reference both alternatives, got: %q", desc)
+		}
+	})
+}
+
+// Availability follows the per-agent allowlist, not just the enable flag:
+// editors enabled globally but hidden by frontmatter must not be named.
+func TestNewAgentInstance_WriteFileCopyExcludesAllowlistHiddenAltTools(t *testing.T) {
+	workspace := setupWorkspace(t, map[string]string{
+		"AGENT.md": "---\ntools: [write_file]\n---\n# Agent\n",
+	})
+	defer cleanupWorkspace(t, workspace)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "test-model",
+			},
+		},
+		Tools: config.ToolsConfig{
+			WriteFile:  config.ToolConfig{Enabled: true},
+			EditFile:   config.ToolConfig{Enabled: true},
+			AppendFile: config.ToolConfig{Enabled: true},
+		},
+	}
+
+	agent := NewAgentInstance(&config.AgentConfig{
+		ID:        "restricted",
+		Workspace: workspace,
+	}, &cfg.Agents.Defaults, cfg, &mockProvider{})
+
+	if _, ok := agent.Tools.Get("edit_file"); ok {
+		t.Fatal("edit_file should be blocked by the allowlist")
+	}
+	if _, ok := agent.Tools.Get("append_file"); ok {
+		t.Fatal("append_file should be blocked by the allowlist")
+	}
+
+	writeTool, ok := agent.Tools.Get("write_file")
+	if !ok {
+		t.Fatal("write_file tool not registered")
+	}
+	if desc := writeTool.Description(); strings.Contains(desc, "append_file") ||
+		strings.Contains(desc, "edit_file") {
+		t.Fatalf("write_file must not name allowlist-hidden tools, got: %q", desc)
+	}
+}
+
 func TestNewAgentInstance_InvalidExecConfigDoesNotExit(t *testing.T) {
 	workspace := t.TempDir()
 
@@ -614,5 +1089,287 @@ func TestNewAgentInstance_InvalidExecConfigDoesNotExit(t *testing.T) {
 
 	if _, ok := agent.Tools.Get("read_file"); !ok {
 		t.Fatal("read_file tool should still be registered")
+	}
+}
+
+func TestNewAgentInstance_UsesFrontmatterModelAndSkills(t *testing.T) {
+	workspace := setupWorkspace(t, map[string]string{
+		"AGENT.md": `---
+model: frontmatter-model
+skills: [frontmatter-skill]
+mcpServers: [GitHub, filesystem]
+---
+# Agent
+
+Use frontmatter identity.
+`,
+	})
+	defer cleanupWorkspace(t, workspace)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "default-model",
+			},
+		},
+	}
+
+	agent := NewAgentInstance(&config.AgentConfig{
+		ID:        "research",
+		Workspace: workspace,
+		Model: &config.AgentModelConfig{
+			Primary: "config-model",
+		},
+		Skills: []string{"config-skill"},
+	}, &cfg.Agents.Defaults, cfg, &mockProvider{})
+
+	if agent.Model != "frontmatter-model" {
+		t.Fatalf("agent.Model = %q, want frontmatter-model", agent.Model)
+	}
+	if len(agent.SkillsFilter) != 1 || agent.SkillsFilter[0] != "frontmatter-skill" {
+		t.Fatalf("agent.SkillsFilter = %v, want [frontmatter-skill]", agent.SkillsFilter)
+	}
+	if !agent.AllowsMCPServer("github") {
+		t.Fatal("expected github MCP server to be allowed from frontmatter")
+	}
+	if !agent.AllowsMCPServer("FILESYSTEM") {
+		t.Fatal("expected filesystem MCP server matching to be case-insensitive")
+	}
+	if agent.AllowsMCPServer("slack") {
+		t.Fatal("expected slack MCP server to be blocked by frontmatter allowlist")
+	}
+}
+
+func TestNewAgentInstance_UsesResolvedProviderForFrontmatterPrimaryModel(t *testing.T) {
+	workspace := setupWorkspace(t, map[string]string{
+		"AGENT.md": `---
+model: claude-frontmatter
+---
+# Agent
+`,
+	})
+	defer cleanupWorkspace(t, workspace)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				Provider:  "openai",
+				ModelName: "default-model",
+			},
+		},
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "claude-frontmatter",
+				Model:     "anthropic/claude-3-7-sonnet",
+				APIKeys:   config.SimpleSecureStrings("test-anthropic-key"),
+				Workspace: workspace,
+			},
+		},
+	}
+
+	defaultProvider := &mockProvider{}
+	agent := NewAgentInstance(&config.AgentConfig{
+		ID:        "research",
+		Workspace: workspace,
+	}, &cfg.Agents.Defaults, cfg, defaultProvider)
+
+	if agent.Model != "claude-frontmatter" {
+		t.Fatalf("agent.Model = %q, want %q", agent.Model, "claude-frontmatter")
+	}
+	if len(agent.Candidates) != 1 {
+		t.Fatalf("len(agent.Candidates) = %d, want 1", len(agent.Candidates))
+	}
+	if got := agent.Candidates[0].Provider; got != "anthropic" {
+		t.Fatalf("primary candidate provider = %q, want %q", got, "anthropic")
+	}
+	if got := agent.Candidates[0].Model; got != "claude-3-7-sonnet" {
+		t.Fatalf("primary candidate model = %q, want %q", got, "claude-3-7-sonnet")
+	}
+	if agent.Provider == defaultProvider {
+		t.Fatal("expected primary provider to be resolved from model_list instead of using injected default provider")
+	}
+}
+
+func TestNewAgentInstance_SuppressesToolDiscoveryPromptWhenNoMCPServersSelected(t *testing.T) {
+	workspace := setupWorkspace(t, map[string]string{
+		"AGENT.md": `---
+mcpServers: []
+---
+# Agent
+`,
+	})
+	defer cleanupWorkspace(t, workspace)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "default-model",
+			},
+		},
+		Tools: config.ToolsConfig{
+			MCP: config.MCPConfig{
+				ToolConfig: config.ToolConfig{Enabled: true},
+				Discovery: config.ToolDiscoveryConfig{
+					Enabled:  true,
+					UseBM25:  true,
+					UseRegex: false,
+				},
+				Servers: map[string]config.MCPServerConfig{
+					"github": {Enabled: true},
+				},
+			},
+		},
+	}
+
+	agent := NewAgentInstance(&config.AgentConfig{
+		ID:        "research",
+		Workspace: workspace,
+	}, &cfg.Agents.Defaults, cfg, &mockProvider{})
+
+	if agent.AllowsMCPServer("github") {
+		t.Fatal("expected empty mcpServers allowlist to deny all servers")
+	}
+	messages := agent.ContextBuilder.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
+	if prompt := messages[0].Content; strings.Contains(prompt, tools.BM25SearchToolName) {
+		t.Fatalf("expected no tool discovery prompt when no MCP servers are selected, got %q", prompt)
+	}
+}
+
+func TestNewAgentInstance_IncludesToolDiscoveryPromptWhenDiscoverableMCPServerSelected(t *testing.T) {
+	workspace := setupWorkspace(t, map[string]string{
+		"AGENT.md": `---
+mcpServers: [github]
+---
+# Agent
+`,
+	})
+	defer cleanupWorkspace(t, workspace)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "default-model",
+			},
+		},
+		Tools: config.ToolsConfig{
+			MCP: config.MCPConfig{
+				ToolConfig: config.ToolConfig{Enabled: true},
+				Discovery: config.ToolDiscoveryConfig{
+					Enabled:  true,
+					UseBM25:  true,
+					UseRegex: false,
+				},
+				Servers: map[string]config.MCPServerConfig{
+					"github": {Enabled: true},
+				},
+			},
+		},
+	}
+
+	agent := NewAgentInstance(&config.AgentConfig{
+		ID:        "research",
+		Workspace: workspace,
+	}, &cfg.Agents.Defaults, cfg, &mockProvider{})
+
+	messages := agent.ContextBuilder.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
+	if prompt := messages[0].Content; !strings.Contains(prompt, tools.BM25SearchToolName) {
+		t.Fatalf("expected tool discovery prompt when a discoverable MCP server is selected, got %q", prompt)
+	}
+}
+
+func TestNewAgentInstance_InvalidFrontmatterFailsClosedForToolsAndMCPServers(t *testing.T) {
+	workspace := setupWorkspace(t, map[string]string{
+		"AGENT.md": `---
+tools: [read_file
+mcpServers: [github]
+---
+# Agent
+`,
+	})
+	defer cleanupWorkspace(t, workspace)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "default-model",
+			},
+		},
+		Tools: config.ToolsConfig{
+			ReadFile: config.ReadFileToolConfig{Enabled: true},
+		},
+	}
+
+	agent := NewAgentInstance(&config.AgentConfig{
+		ID:        "research",
+		Workspace: workspace,
+	}, &cfg.Agents.Defaults, cfg, &mockProvider{})
+
+	if _, ok := agent.Tools.Get("read_file"); ok {
+		t.Fatal("expected malformed frontmatter to fail closed and block read_file")
+	}
+	if agent.AllowsMCPServer("github") {
+		t.Fatal("expected malformed frontmatter to fail closed for MCP servers")
+	}
+}
+
+func TestNewAgentInstance_ExplicitEmptyToolsFieldBlocksAllTools(t *testing.T) {
+	tests := []struct {
+		name         string
+		toolsSnippet string
+	}{
+		{
+			name:         "empty list",
+			toolsSnippet: "tools: []",
+		},
+		{
+			name:         "blank field",
+			toolsSnippet: "tools:",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace := setupWorkspace(t, map[string]string{
+				"AGENT.md": `---
+` + tt.toolsSnippet + `
+---
+# Agent
+`,
+			})
+			defer cleanupWorkspace(t, workspace)
+
+			cfg := &config.Config{
+				Agents: config.AgentsConfig{
+					Defaults: config.AgentDefaults{
+						Workspace: workspace,
+						ModelName: "default-model",
+					},
+				},
+				Tools: config.ToolsConfig{
+					ReadFile: config.ReadFileToolConfig{Enabled: true},
+					ListDir:  config.ToolConfig{Enabled: true},
+				},
+			}
+
+			agent := NewAgentInstance(&config.AgentConfig{
+				ID:        "research",
+				Workspace: workspace,
+			}, &cfg.Agents.Defaults, cfg, &mockProvider{})
+
+			if got := agent.Tools.List(); len(got) != 0 {
+				t.Fatalf("agent tools = %v, want no registered tools", got)
+			}
+			if _, ok := agent.Tools.Get("read_file"); ok {
+				t.Fatal("expected read_file to be blocked by explicit empty tools field")
+			}
+			if _, ok := agent.Tools.Get("list_dir"); ok {
+				t.Fatal("expected list_dir to be blocked by explicit empty tools field")
+			}
+		})
 	}
 }
