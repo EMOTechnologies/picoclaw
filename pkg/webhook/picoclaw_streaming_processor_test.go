@@ -100,7 +100,15 @@ func TestStreamPicoClawAI_TerminalCallbacksCarryLatestTurnUsage(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if _, _, err := streamPicoClawAI(ctx, wsURL, "token", "scrape", "sess-1", callback.URL, "job-1"); err != nil {
+			if _, _, err := streamPicoClawAI(
+				ctx,
+				wsURL,
+				"token",
+				"scrape",
+				"sess-1",
+				callback.URL,
+				"job-1",
+			); err != nil {
 				t.Fatalf("streamPicoClawAI() error = %v", err)
 			}
 
