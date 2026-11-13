@@ -25,6 +25,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/netbind"
 	ppid "github.com/sipeed/picoclaw/pkg/pid"
+	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/web/backend/utils"
 )
 
@@ -372,21 +373,34 @@ func (h *Handler) gatewayStartReady() (bool, string, error) {
 	if err != nil {
 		return false, "", fmt.Errorf("failed to load config: %w", err)
 	}
+	normalizeStoredModelNames(cfg)
 
 	modelName := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 	if modelName == "" {
 		return false, "no default model configured", nil
+	}
+	if aliasModels := modelConfigsByName(cfg)[modelName]; len(aliasModels) > 1 {
+		if err := validateDefaultChainModelSet(
+			modelName,
+			aliasModels,
+			true,
+			defaultChainProvider(cfg),
+		); err != nil {
+			// Validation failures are readiness reasons, not handler errors.
+			//nolint:nilerr
+			return false, err.Error(), nil
+		}
 	}
 
 	modelCfg := lookupModelConfig(cfg, modelName)
 	if modelCfg == nil {
 		return false, fmt.Sprintf("default model %q is invalid", modelName), nil
 	}
-	if !defaultModelAllowedForModelConfig(modelCfg) {
+	if !defaultModelAllowedForModelConfig(modelCfg, defaultChainProvider(cfg)) {
 		return false, fmt.Sprintf("default model %q is not usable for chat", modelName), nil
 	}
 
-	if !hasModelConfiguration(modelCfg) {
+	if !rawTemplateHasConfiguration(modelCfg) {
 		return false, fmt.Sprintf("default model %q has no credentials configured", modelName), nil
 	}
 	if requiresRuntimeProbe(modelCfg) && !probeLocalModelAvailability(modelCfg) {
@@ -397,7 +411,7 @@ func (h *Handler) gatewayStartReady() (bool, string, error) {
 }
 
 func lookupModelConfig(cfg *config.Config, modelName string) *config.ModelConfig {
-	modelCfg, err := cfg.GetModelConfig(modelName)
+	modelCfg, err := providers.ResolveModelConfig(cfg, modelName)
 	if err != nil {
 		return nil
 	}
@@ -409,9 +423,14 @@ func computeConfigSignature(cfg *config.Config) string {
 		return ""
 	}
 	var parts []string
+	parts = append(parts, "default_provider:"+defaultChainProvider(cfg))
 	defaultModel := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 	if defaultModel != "" {
 		parts = append(parts, "model:"+defaultModel)
+	}
+	modelStreamingSignatures := computeModelStreamingSignatures(cfg)
+	if len(modelStreamingSignatures) > 0 {
+		parts = append(parts, "model_streaming:"+strings.Join(modelStreamingSignatures, ","))
 	}
 	toolSignatures := []string{}
 	if cfg.Tools.ReadFile.Enabled {
@@ -489,6 +508,155 @@ func computeConfigSignature(cfg *config.Config) string {
 		parts = append(parts, "channels:"+strings.Join(channelSignatures, ","))
 	}
 	return strings.Join(parts, ";")
+}
+
+func computeModelStreamingSignatures(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	defaultProvider := strings.TrimSpace(cfg.Agents.Defaults.Provider)
+	if defaultProvider == "" {
+		defaultProvider = "openai"
+	}
+	type streamingRef struct {
+		scope string
+		name  string
+	}
+
+	refs := []streamingRef{{
+		scope: "defaults.primary",
+		name:  strings.TrimSpace(cfg.Agents.Defaults.GetModelName()),
+	}}
+	for i, name := range cfg.Agents.Defaults.ModelFallbacks {
+		refs = append(refs, streamingRef{
+			scope: "defaults.fallback:" + strconv.Itoa(i),
+			name:  name,
+		})
+	}
+	if cfg.Agents.Defaults.Routing != nil {
+		refs = append(refs, streamingRef{
+			scope: "defaults.routing.light",
+			name:  cfg.Agents.Defaults.Routing.LightModel,
+		})
+	}
+	for agentIndex, agent := range cfg.Agents.List {
+		if agent.Model == nil {
+			continue
+		}
+		refs = append(refs, streamingRef{
+			scope: "agent:" + strconv.Itoa(agentIndex) + ".primary",
+			name:  agent.Model.Primary,
+		})
+		for i, name := range agent.Model.Fallbacks {
+			refs = append(refs, streamingRef{
+				scope: "agent:" + strconv.Itoa(agentIndex) + ".fallback:" + strconv.Itoa(i),
+				name:  name,
+			})
+		}
+	}
+
+	seenEntries := make(map[string]bool)
+	signatures := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		ref.name = strings.TrimSpace(ref.name)
+		if ref.name == "" {
+			continue
+		}
+		referenceEntry := strings.Join([]string{ref.scope, ref.name}, ":")
+		if !seenEntries[referenceEntry] {
+			seenEntries[referenceEntry] = true
+			signatures = append(signatures, referenceEntry)
+		}
+		for _, match := range modelConfigsMatchingSignatureRef(cfg.ModelList, ref.name, defaultProvider) {
+			mc := match.model
+			entry := strings.Join([]string{
+				ref.scope,
+				ref.name,
+				strconv.Itoa(match.index),
+				strings.TrimSpace(mc.Provider),
+				strings.TrimSpace(mc.Model),
+				strconv.FormatBool(mc.Streaming.Enabled),
+			}, ":")
+			if seenEntries[entry] {
+				continue
+			}
+			seenEntries[entry] = true
+			signatures = append(signatures, entry)
+		}
+	}
+	sort.Strings(signatures)
+	return signatures
+}
+
+type signatureModelConfigMatch struct {
+	index int
+	model *config.ModelConfig
+}
+
+func modelConfigsMatchingSignatureRef(
+	modelList []*config.ModelConfig,
+	raw string,
+	defaultProvider string,
+) []signatureModelConfigMatch {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	matches := make([]signatureModelConfigMatch, 0, 1)
+	for i, mc := range modelList {
+		if mc == nil || strings.TrimSpace(mc.ModelName) != raw {
+			continue
+		}
+		matches = append(matches, signatureModelConfigMatch{index: i, model: mc})
+	}
+	if len(matches) > 0 {
+		return matches
+	}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{Provider: defaultProvider},
+		},
+		ModelList: modelList,
+	}
+	resolved, err := providers.ResolveModelConfig(cfg, raw)
+	if err != nil {
+		return nil
+	}
+	for i, modelCfg := range modelList {
+		if modelConfigsMatchResolvedEntry(modelCfg, resolved, defaultProvider) {
+			return []signatureModelConfigMatch{{index: i, model: modelCfg}}
+		}
+	}
+	return nil
+}
+
+func modelConfigsMatchResolvedEntry(
+	left,
+	right *config.ModelConfig,
+	defaultProvider string,
+) bool {
+	if left == nil || right == nil || left.IsVirtual() {
+		return false
+	}
+	leftProvider, leftModel := modelConfigProviderAndID(left, defaultProvider)
+	rightProvider, rightModel := providers.ExtractProtocol(right)
+	return left.ModelName == right.ModelName &&
+		providers.ModelKey(leftProvider, leftModel) == providers.ModelKey(rightProvider, rightModel) &&
+		left.APIBase == right.APIBase &&
+		left.APIKey() == right.APIKey() &&
+		left.Enabled == right.Enabled &&
+		left.AuthMethod == right.AuthMethod &&
+		left.ConnectMode == right.ConnectMode
+}
+
+func modelConfigProviderAndID(mc *config.ModelConfig, defaultProvider string) (string, string) {
+	if mc == nil {
+		return "", ""
+	}
+	if strings.TrimSpace(mc.Provider) != "" {
+		return providers.ExtractProtocol(mc)
+	}
+	return providers.SplitModelProviderAndID(mc.Model, defaultProvider)
 }
 
 func computeChannelSignatures(channels config.ChannelsConfig) []string {

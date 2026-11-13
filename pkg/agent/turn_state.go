@@ -5,11 +5,13 @@ package agent
 import (
 	"context"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -82,6 +84,7 @@ const (
 
 type turnResult struct {
 	finalContent string
+	modelName    string
 	status       TurnEndStatus
 	followUps    []bus.InboundMessage
 }
@@ -111,10 +114,11 @@ type ActiveTurnInfo struct {
 
 type turnExecution struct {
 	// Core message state (accumulates throughout the turn)
-	messages        []providers.Message // built from ContextBuilder, grows per-iteration
-	pendingMessages []providers.Message // steering/SubTurn messages awaiting injection
-	history         []providers.Message // from ContextManager.Assemble
-	summary         string
+	messages         []providers.Message // built from ContextBuilder, grows per-iteration
+	pendingMessages  []providers.Message // steering/SubTurn messages awaiting injection
+	history          []providers.Message // from ContextManager.Assemble
+	summary          string
+	currentTurnStart int
 
 	// Turn output
 	finalContent string
@@ -123,21 +127,27 @@ type turnExecution struct {
 	iteration int
 
 	// Per-iteration state set by Pipeline.PreLLM
-	activeCandidates []providers.FallbackCandidate
-	activeModel      string
-	activeProvider   providers.LLMProvider
-	usedLight        bool
+	activeCandidates  []providers.FallbackCandidate
+	activeModel       string
+	activeModelConfig *config.ModelConfig
+	activeProvider    providers.LLMProvider
+	usedLight         bool
 
 	// LLM call per-iteration state
 	response            *providers.LLMResponse
 	normalizedToolCalls []providers.ToolCall
 	allResponsesHandled bool
+	streamingPublisher  *streamingChunkPublisher
+	streamingFallback   bool
+	suppressReasoning   bool
 	callMessages        []providers.Message
 	providerToolDefs    []providers.ToolDefinition
 	llmModel            string
+	llmModelName        string
 	llmOpts             map[string]any
 	gracefulTerminal    bool
 	useNativeSearch     bool
+	ownedProviders      []providers.LLMProvider
 
 	// Phase tracking
 	phase LLMPhase
@@ -145,6 +155,14 @@ type turnExecution struct {
 	// Abort signaling for coordinator (set by Pipeline methods)
 	abortedByHardAbort bool // true when hard abort triggered during LLM/tools
 	abortedByHook      bool // true when HookActionAbortTurn triggered
+}
+
+func (exec *turnExecution) closeOwnedProviders() {
+	if exec == nil {
+		return
+	}
+	closeUniqueStatefulProviders(exec.ownedProviders...)
+	exec.ownedProviders = nil
 }
 
 // newTurnExecution creates a turnExecution initialized from turnState and options.
@@ -156,12 +174,13 @@ func newTurnExecution(
 	messages []providers.Message,
 ) *turnExecution {
 	return &turnExecution{
-		history:         history,
-		summary:         summary,
-		messages:        messages,
-		pendingMessages: append([]providers.Message(nil), opts.InitialSteeringMessages...),
-		iteration:       0,
-		phase:           LLMPhaseSetup,
+		history:          history,
+		summary:          summary,
+		messages:         messages,
+		pendingMessages:  append([]providers.Message(nil), opts.InitialSteeringMessages...),
+		currentTurnStart: len(messages),
+		iteration:        0,
+		phase:            LLMPhaseSetup,
 	}
 }
 
@@ -172,17 +191,24 @@ func newTurnExecution(
 type turnState struct {
 	mu sync.RWMutex
 
-	agent *AgentInstance
-	opts  processOptions
-	scope turnEventScope
+	agent   *AgentInstance
+	opts    processOptions
+	profile config.EffectiveTurnProfile
+	scope   turnEventScope
 
-	turnID     string
-	agentID    string
-	sessionKey string
-	turnCtx    *TurnContext
+	turnID            string
+	agentID           string
+	sessionKey        string
+	activeSkills      []string
+	attemptedSkills   []string
+	skillContextTrace []SkillContextSnapshot
+	toolKinds         []string
+	toolExecutions    []ToolExecutionRecord
+	turnCtx           *TurnContext
 
 	channel     string
 	chatID      string
+	workspace   string
 	userMessage string
 	media       []string
 
@@ -239,19 +265,22 @@ type turnState struct {
 
 func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScope) *turnState {
 	ts := &turnState{
-		agent:       agent,
-		opts:        opts,
-		scope:       scope,
-		turnID:      scope.turnID,
-		agentID:     agent.ID,
-		sessionKey:  opts.Dispatch.SessionKey,
-		turnCtx:     cloneTurnContext(scope.context),
-		channel:     opts.Dispatch.Channel(),
-		chatID:      opts.Dispatch.ChatID(),
-		userMessage: opts.Dispatch.UserMessage,
-		media:       append([]string(nil), opts.Dispatch.Media...),
-		phase:       TurnPhaseSetup,
-		startedAt:   time.Now(),
+		agent:        agent,
+		opts:         opts,
+		profile:      opts.TurnProfile,
+		scope:        scope,
+		turnID:       scope.turnID,
+		agentID:      agent.ID,
+		sessionKey:   opts.Dispatch.SessionKey,
+		activeSkills: activeSkillNames(agent, opts),
+		turnCtx:      cloneTurnContext(scope.context),
+		channel:      opts.Dispatch.Channel(),
+		chatID:       opts.Dispatch.ChatID(),
+		workspace:    agent.Workspace,
+		userMessage:  opts.Dispatch.UserMessage,
+		media:        append([]string(nil), opts.Dispatch.Media...),
+		phase:        TurnPhaseSetup,
+		startedAt:    time.Now(),
 	}
 
 	// Bind session store and capture initial history length for rollback logic
@@ -271,7 +300,17 @@ func (al *AgentLoop) registerActiveTurn(ts *turnState) {
 }
 
 func (al *AgentLoop) clearActiveTurn(ts *turnState) {
-	al.activeTurnStates.Delete(ts.sessionKey)
+	al.releaseSessionTurnState(ts.sessionKey, ts)
+}
+
+func (al *AgentLoop) releaseSessionTurnState(sessionKey string, expected *turnState) {
+	if expected == nil {
+		al.activeTurnStates.Delete(sessionKey)
+		return
+	}
+	if actual, ok := al.activeTurnStates.Load(sessionKey); ok && actual == expected {
+		al.activeTurnStates.Delete(sessionKey)
+	}
 }
 
 func (al *AgentLoop) getActiveTurnState(sessionKey string) *turnState {
@@ -379,6 +418,160 @@ func (ts *turnState) finalContentLen() int {
 	return len(ts.finalContent)
 }
 
+func (ts *turnState) finalContentSnapshot() string {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return ts.finalContent
+}
+
+func (ts *turnState) recordToolKind(tool string) {
+	tool = strings.TrimSpace(tool)
+	if tool == "" {
+		return
+	}
+
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+
+	for _, existing := range ts.toolKinds {
+		if existing == tool {
+			return
+		}
+	}
+	ts.toolKinds = append(ts.toolKinds, tool)
+}
+
+func (ts *turnState) toolKindsSnapshot() []string {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return append([]string(nil), ts.toolKinds...)
+}
+
+func (ts *turnState) recordToolExecution(tool string, success bool, errorSummary string, skillNames []string) {
+	tool = strings.TrimSpace(tool)
+	if tool == "" {
+		return
+	}
+
+	ts.recordToolKind(tool)
+
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.toolExecutions = append(ts.toolExecutions, ToolExecutionRecord{
+		Name:         tool,
+		Success:      success,
+		ErrorSummary: strings.TrimSpace(errorSummary),
+		SkillNames:   append([]string(nil), skillNames...),
+	})
+}
+
+func (ts *turnState) toolExecutionsSnapshot() []ToolExecutionRecord {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	if len(ts.toolExecutions) == 0 {
+		return nil
+	}
+
+	out := make([]ToolExecutionRecord, 0, len(ts.toolExecutions))
+	for _, exec := range ts.toolExecutions {
+		out = append(out, ToolExecutionRecord{
+			Name:         exec.Name,
+			Success:      exec.Success,
+			ErrorSummary: exec.ErrorSummary,
+			SkillNames:   append([]string(nil), exec.SkillNames...),
+		})
+	}
+	return out
+}
+
+func (ts *turnState) recordAttemptedSkills(skillNames []string) {
+	if len(skillNames) == 0 {
+		return
+	}
+
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+
+	for _, skillName := range skillNames {
+		skillName = strings.TrimSpace(skillName)
+		if skillName == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range ts.attemptedSkills {
+			if existing == skillName {
+				seen = true
+				break
+			}
+		}
+		if seen {
+			continue
+		}
+		ts.attemptedSkills = append(ts.attemptedSkills, skillName)
+	}
+}
+
+func (ts *turnState) attemptedSkillsSnapshot() []string {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return append([]string(nil), ts.attemptedSkills...)
+}
+
+func (ts *turnState) recordSkillContextSnapshot(trigger string, skillNames []string) {
+	if len(skillNames) == 0 {
+		return
+	}
+
+	filtered := make([]string, 0, len(skillNames))
+	for _, skillName := range skillNames {
+		skillName = strings.TrimSpace(skillName)
+		if skillName == "" {
+			continue
+		}
+		filtered = append(filtered, skillName)
+	}
+	if len(filtered) == 0 {
+		return
+	}
+
+	ts.recordAttemptedSkills(filtered)
+
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.skillContextTrace = append(ts.skillContextTrace, SkillContextSnapshot{
+		Sequence:   len(ts.skillContextTrace) + 1,
+		Trigger:    trigger,
+		SkillNames: append([]string(nil), filtered...),
+	})
+}
+
+func (ts *turnState) latestSkillContextSnapshot() []string {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	if len(ts.skillContextTrace) == 0 {
+		return nil
+	}
+	return append([]string(nil), ts.skillContextTrace[len(ts.skillContextTrace)-1].SkillNames...)
+}
+
+func (ts *turnState) skillContextSnapshotsSnapshot() []SkillContextSnapshot {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	if len(ts.skillContextTrace) == 0 {
+		return nil
+	}
+
+	snapshots := make([]SkillContextSnapshot, 0, len(ts.skillContextTrace))
+	for _, snapshot := range ts.skillContextTrace {
+		snapshots = append(snapshots, SkillContextSnapshot{
+			Sequence:   snapshot.Sequence,
+			Trigger:    snapshot.Trigger,
+			SkillNames: append([]string(nil), snapshot.SkillNames...),
+		})
+	}
+	return snapshots
+}
+
 func (ts *turnState) setTurnCancel(cancel context.CancelFunc) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -472,13 +665,17 @@ func (ts *turnState) recordPersistedMessage(msg providers.Message) {
 	ts.persistedMessages = append(ts.persistedMessages, msg)
 }
 
+func (ts *turnState) persistedMessagesSnapshot() []providers.Message {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return append([]providers.Message(nil), ts.persistedMessages...)
+}
+
 func (ts *turnState) refreshRestorePointFromSession(agent *AgentInstance) {
 	history := agent.Sessions.GetHistory(ts.sessionKey)
 	summary := agent.Sessions.GetSummary(ts.sessionKey)
 
-	ts.mu.RLock()
-	persisted := append([]providers.Message(nil), ts.persistedMessages...)
-	ts.mu.RUnlock()
+	persisted := ts.persistedMessagesSnapshot()
 
 	if matched := matchingTurnMessageTail(history, persisted); matched > 0 {
 		history = append([]providers.Message(nil), history[:len(history)-matched]...)
@@ -518,11 +715,81 @@ func (ts *turnState) restoreSession(agent *AgentInstance) error {
 func matchingTurnMessageTail(history, persisted []providers.Message) int {
 	maxMatch := min(len(history), len(persisted))
 	for size := maxMatch; size > 0; size-- {
-		if reflect.DeepEqual(history[len(history)-size:], persisted[len(persisted)-size:]) {
+		if messageSlicesEquivalent(history[len(history)-size:], persisted[len(persisted)-size:]) {
 			return size
 		}
 	}
 	return 0
+}
+
+func splitHistoryForActiveTurn(
+	history []providers.Message,
+	persisted []providers.Message,
+) ([]providers.Message, []providers.Message) {
+	matched := matchingTurnMessageTail(history, persisted)
+	if matched <= 0 {
+		return append([]providers.Message(nil), history...), nil
+	}
+
+	stable := append([]providers.Message(nil), history[:len(history)-matched]...)
+	protected := append([]providers.Message(nil), history[len(history)-matched:]...)
+	return stable, protected
+}
+
+func messageSlicesEquivalent(a, b []providers.Message) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !messagesEquivalent(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func messagesEquivalent(a, b providers.Message) bool {
+	return reflect.DeepEqual(normalizeMessageForComparison(a), normalizeMessageForComparison(b))
+}
+
+func normalizeMessageForComparison(msg providers.Message) providers.Message {
+	msg.PromptLayer = ""
+	msg.PromptSlot = ""
+	msg.PromptSource = ""
+
+	if len(msg.Media) == 0 {
+		msg.Media = nil
+	}
+	if len(msg.Attachments) == 0 {
+		msg.Attachments = nil
+	}
+	if len(msg.SystemParts) == 0 {
+		msg.SystemParts = nil
+	} else {
+		msg.SystemParts = append([]providers.ContentBlock(nil), msg.SystemParts...)
+		for i := range msg.SystemParts {
+			msg.SystemParts[i].PromptLayer = ""
+			msg.SystemParts[i].PromptSlot = ""
+			msg.SystemParts[i].PromptSource = ""
+		}
+	}
+	if len(msg.ToolCalls) == 0 {
+		msg.ToolCalls = nil
+	} else {
+		msg.ToolCalls = append([]providers.ToolCall(nil), msg.ToolCalls...)
+		for i := range msg.ToolCalls {
+			msg.ToolCalls[i].Name = ""
+			msg.ToolCalls[i].Arguments = nil
+			msg.ToolCalls[i].ThoughtSignature = ""
+			if msg.ToolCalls[i].Function != nil {
+				fn := *msg.ToolCalls[i].Function
+				fn.ThoughtSignature = ""
+				msg.ToolCalls[i].Function = &fn
+			}
+		}
+	}
+
+	return msg
 }
 
 func (ts *turnState) interruptHintMessage() providers.Message {
