@@ -102,9 +102,12 @@ func (p *GitHubCopilotProvider) Chat(
 		return nil, fmt.Errorf("provider closed")
 	}
 
+	usage := &copilotUsageCollector{}
+	unsubscribe := session.On(usage.handle)
 	resp, err := session.SendAndWait(ctx, copilot.MessageOptions{
 		Prompt: string(fullcontent),
 	})
+	unsubscribe()
 	if err != nil {
 		return nil, fmt.Errorf("failed to send message to copilot: %w", err)
 	}
@@ -120,7 +123,48 @@ func (p *GitHubCopilotProvider) Chat(
 	return &LLMResponse{
 		FinishReason: "stop",
 		Content:      content,
+		Usage:        usage.info(),
 	}, nil
+}
+
+// copilotUsageCollector sums the assistant.usage events the Copilot SDK emits
+// for each underlying LLM call. The session is shared, so concurrent Chat calls
+// on one provider can mix their counts.
+type copilotUsageCollector struct {
+	mu     sync.Mutex
+	input  int
+	output int
+	seen   bool
+}
+
+func (c *copilotUsageCollector) handle(event copilot.SessionEvent) {
+	if event.Type != copilot.SessionEventTypeAssistantUsage {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seen = true
+	// Assumes inputTokens already includes cache reads, like OpenAI's
+	// prompt_tokens; cacheReadTokens/cacheWriteTokens are not added on top.
+	if event.Data.InputTokens != nil {
+		c.input += int(*event.Data.InputTokens)
+	}
+	if event.Data.OutputTokens != nil {
+		c.output += int(*event.Data.OutputTokens)
+	}
+}
+
+func (c *copilotUsageCollector) info() *UsageInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.seen {
+		return nil
+	}
+	return &UsageInfo{
+		PromptTokens:     c.input,
+		CompletionTokens: c.output,
+		TotalTokens:      c.input + c.output,
+	}
 }
 
 func (p *GitHubCopilotProvider) GetDefaultModel() string {

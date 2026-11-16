@@ -125,7 +125,13 @@ func (u *turnUsage) wait(timeout time.Duration) bool {
 }
 
 func (u *turnUsage) add(usage *providers.UsageInfo, model string) {
-	if u == nil || usage == nil {
+	if u == nil {
+		return
+	}
+	if usage == nil {
+		logger.WarnCF("agent", "LLM response has no token usage; turn usage will be incomplete", map[string]any{
+			"model": model,
+		})
 		return
 	}
 	total := usage.TotalTokens

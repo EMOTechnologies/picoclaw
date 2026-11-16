@@ -140,3 +140,19 @@ func TestBuildRequest_PreservesComplexToolSchemasByDefault(t *testing.T) {
 		t.Fatalf("parameters = %#v, want raw schema with $defs preserved by default", got)
 	}
 }
+
+func TestParseSSEResponse_CountsThinkingTokensAsOutput(t *testing.T) {
+	p := &AntigravityProvider{}
+	body := "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}],\"role\":\"model\"}," +
+		"\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":8,\"candidatesTokenCount\":17," +
+		"\"thoughtsTokenCount\":100,\"totalTokenCount\":125}}}\n" +
+		"data: [DONE]\n"
+
+	resp, err := p.parseSSEResponse(body)
+	if err != nil {
+		t.Fatalf("parseSSEResponse() error = %v", err)
+	}
+	if resp.Usage == nil || resp.Usage.CompletionTokens != 117 || resp.Usage.TotalTokens != 125 {
+		t.Fatalf("Usage = %#v, want completion=117 total=125", resp.Usage)
+	}
+}

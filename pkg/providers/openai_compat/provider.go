@@ -540,7 +540,38 @@ func (p *Provider) ChatStreamEvents(
 
 	requestBody := p.buildRequestBody(messages, tools, model, options)
 	requestBody["stream"] = true
+	// OpenAI only reports token usage on streamed responses when asked to.
+	// extra_body can still override or remove stream_options.
+	addedStreamOptions := false
+	if _, ok := requestBody["stream_options"]; !ok {
+		requestBody["stream_options"] = map[string]any{"include_usage": true}
+		addedStreamOptions = true
+	}
 
+	resp, err := p.sendStreamRequest(ctx, requestBody)
+	if err != nil {
+		return nil, err
+	}
+	if addedStreamOptions && isStreamOptionsRejected(resp) {
+		// Some OpenAI-compatible servers reject stream_options; retry without it
+		// (the response will then have no usage unless the server sends it anyway).
+		resp.Body.Close()
+		delete(requestBody, "stream_options")
+		resp, err = p.sendStreamRequest(ctx, requestBody)
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, common.HandleErrorResponse(resp, p.apiBase)
+	}
+
+	return parseStreamResponse(ctx, withStreamingReadIdleTimeout(resp.Body, defaultStreamingReadIdleTimeout), onChunk)
+}
+
+func (p *Provider) sendStreamRequest(ctx context.Context, requestBody map[string]any) (*http.Response, error) {
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -569,13 +600,19 @@ func (p *Provider) ChatStreamEvents(
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	return resp, nil
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, common.HandleErrorResponse(resp, p.apiBase)
+// isStreamOptionsRejected reports whether a 400/422 response complains about
+// stream_options. The body is buffered and restored so callers can still read it.
+func isStreamOptionsRejected(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnprocessableEntity {
+		return false
 	}
-
-	return parseStreamResponse(ctx, withStreamingReadIdleTimeout(resp.Body, defaultStreamingReadIdleTimeout), onChunk)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	return strings.Contains(strings.ToLower(string(body)), "stream_options")
 }
 
 func withStreamingReadIdleTimeout(body io.ReadCloser, timeout time.Duration) io.ReadCloser {

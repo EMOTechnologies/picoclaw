@@ -187,7 +187,8 @@ func (p *CodexCliProvider) parseJSONLEvents(output string) (*LLMResponse, error)
 			}
 		case "turn.completed":
 			if event.Usage != nil {
-				promptTokens := event.Usage.InputTokens + event.Usage.CachedInputTokens
+				// input_tokens already includes cached_input_tokens.
+				promptTokens := event.Usage.InputTokens
 				usage = &UsageInfo{
 					PromptTokens:     promptTokens,
 					CompletionTokens: event.Usage.OutputTokens,

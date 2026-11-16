@@ -2196,3 +2196,96 @@ func TestSerializeMessages_StripsSystemParts(t *testing.T) {
 		t.Fatal("system_parts should not appear in serialized output")
 	}
 }
+
+func TestProviderChatStream_RequestsAndParsesUsage(t *testing.T) {
+	var gotStreamOptions any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotStreamOptions = body["stream_options"]
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write(
+			[]byte(
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}\n\n",
+			),
+		)
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	out, err := p.ChatStream(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "gpt-4o", nil, nil)
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+
+	opts, ok := gotStreamOptions.(map[string]any)
+	if !ok || opts["include_usage"] != true {
+		t.Fatalf("stream_options = %#v, want include_usage=true", gotStreamOptions)
+	}
+	if out.Usage == nil || out.Usage.PromptTokens != 11 || out.Usage.CompletionTokens != 7 ||
+		out.Usage.TotalTokens != 18 {
+		t.Fatalf("Usage = %#v, want 11/7/18", out.Usage)
+	}
+}
+
+func TestProviderChatStream_RetriesWithoutStreamOptionsWhenRejected(t *testing.T) {
+	var calls int
+	var lastHadStreamOptions bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, lastHadStreamOptions = body["stream_options"]
+		if lastHadStreamOptions {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"Unrecognized request argument: stream_options"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	out, err := p.ChatStream(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "local-model", nil, nil)
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	if calls != 2 || lastHadStreamOptions {
+		t.Fatalf(
+			"calls = %d, lastHadStreamOptions = %v; want a retry without stream_options",
+			calls,
+			lastHadStreamOptions,
+		)
+	}
+	if out.Content != "ok" {
+		t.Fatalf("Content = %q, want %q", out.Content, "ok")
+	}
+}
+
+func TestProviderChatStream_OtherBadRequestIsNotRetried(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"model not found"}}`))
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	_, err := p.ChatStream(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "missing", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "model not found") {
+		t.Fatalf("err = %v, want error containing the server message", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
