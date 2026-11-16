@@ -345,10 +345,11 @@ type antigravityJSONResponse struct {
 		FinishReason string `json:"finishReason"`
 	} `json:"candidates"`
 	UsageMetadata struct {
-		PromptTokenCount     int `json:"promptTokenCount"`
-		CandidatesTokenCount int `json:"candidatesTokenCount"`
-		ThoughtsTokenCount   int `json:"thoughtsTokenCount"` // thinking tokens, billed as output
-		TotalTokenCount      int `json:"totalTokenCount"`
+		PromptTokenCount        int `json:"promptTokenCount"`
+		CandidatesTokenCount    int `json:"candidatesTokenCount"`
+		ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
+		ToolUsePromptTokenCount int `json:"toolUsePromptTokenCount"`
+		TotalTokenCount         int `json:"totalTokenCount"`
 	} `json:"usageMetadata"`
 }
 
@@ -412,7 +413,7 @@ func (p *AntigravityProvider) parseSSEResponse(body string) (*LLMResponse, error
 
 		if resp.UsageMetadata.TotalTokenCount > 0 {
 			usage = &UsageInfo{
-				PromptTokens:     resp.UsageMetadata.PromptTokenCount,
+				PromptTokens:     resp.UsageMetadata.PromptTokenCount + resp.UsageMetadata.ToolUsePromptTokenCount,
 				CompletionTokens: resp.UsageMetadata.CandidatesTokenCount + resp.UsageMetadata.ThoughtsTokenCount,
 				TotalTokens:      resp.UsageMetadata.TotalTokenCount,
 			}

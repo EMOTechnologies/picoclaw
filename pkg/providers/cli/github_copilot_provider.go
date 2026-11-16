@@ -16,7 +16,8 @@ type GitHubCopilotProvider struct {
 	client  *copilot.Client
 	session *copilot.Session
 
-	mu sync.Mutex
+	mu     sync.Mutex
+	chatMu sync.Mutex
 }
 
 func NewGitHubCopilotProvider(uri string, connectMode string, model string) (*GitHubCopilotProvider, error) {
@@ -102,6 +103,9 @@ func (p *GitHubCopilotProvider) Chat(
 		return nil, fmt.Errorf("provider closed")
 	}
 
+	p.chatMu.Lock()
+	defer p.chatMu.Unlock()
+
 	usage := &copilotUsageCollector{}
 	unsubscribe := session.On(usage.handle)
 	resp, err := session.SendAndWait(ctx, copilot.MessageOptions{
@@ -127,9 +131,6 @@ func (p *GitHubCopilotProvider) Chat(
 	}, nil
 }
 
-// copilotUsageCollector sums the assistant.usage events the Copilot SDK emits
-// for each underlying LLM call. The session is shared, so concurrent Chat calls
-// on one provider can mix their counts.
 type copilotUsageCollector struct {
 	mu     sync.Mutex
 	input  int
@@ -144,8 +145,6 @@ func (c *copilotUsageCollector) handle(event copilot.SessionEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.seen = true
-	// Assumes inputTokens already includes cache reads, like OpenAI's
-	// prompt_tokens; cacheReadTokens/cacheWriteTokens are not added on top.
 	if event.Data.InputTokens != nil {
 		c.input += int(*event.Data.InputTokens)
 	}

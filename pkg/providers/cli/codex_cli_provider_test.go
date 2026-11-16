@@ -34,7 +34,7 @@ func TestParseJSONLEvents_AgentMessage(t *testing.T) {
 	if resp.Usage == nil {
 		t.Fatal("Usage should not be nil")
 	}
-	if resp.Usage.PromptTokens != 100 { // input_tokens already includes cached_input_tokens
+	if resp.Usage.PromptTokens != 100 {
 		t.Errorf("PromptTokens = %d, want 100", resp.Usage.PromptTokens)
 	}
 	if resp.Usage.CompletionTokens != 20 {

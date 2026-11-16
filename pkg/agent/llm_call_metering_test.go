@@ -13,37 +13,19 @@ import (
 	"testing"
 )
 
-// llmCallSites lists every place outside pkg/providers that calls an LLM
-// (Chat / ChatStream / ChatStreamEvents), keyed by "<file> <function>".
-// Each entry says how that call is metered into per-turn usage (turn_usage),
-// or why it is exempt.
-//
-// TestAllLLMCallsAreMetered fails when a call site is added that is not listed
-// here, or when a listed one disappears. If it fails after an upstream sync:
-// make the new call record usage (usageFromContext(ctx).add(resp.Usage, model)
-// or route it through the agent pipeline), then add it here.
 var llmCallSites = map[string]string{
-	// Main agent loop. Every successful response is recorded at the single
-	// ts.usage.add call in Pipeline.CallLLM.
 	"pkg/agent/pipeline_llm.go Pipeline.CallLLM":                         "metered: ts.usage.add in Pipeline.CallLLM",
 	"pkg/agent/pipeline_streaming.go Pipeline.tryConfiguredStreamingLLM": "metered: response returned to Pipeline.CallLLM",
 
-	// Context management (may run in the background; tracked via backgroundwork).
 	"pkg/agent/context_seahorse.go providerToCompleteFn":            "metered: usageFromContext(ctx).add",
 	"pkg/agent/context_legacy.go legacyContextManager.retryLLMCall": "metered: turnUsageFromContext(ctx).add",
 
-	// /btw side question; reply is sent by PublishResponseIfNeeded with turn usage.
 	"pkg/agent/turn_coord.go AgentLoop.askSideQuestion": "metered: usageFromContext(ctx).add",
 
-	// Voice transcription with an LLM; usage returned in TranscriptionResponse
-	// and recorded in AgentLoop.transcribeAudioInMessage.
 	"pkg/audio/asr/audio_model_transcriber.go AudioModelTranscriber.Transcribe": "metered: via TranscriptionResponse.Usage",
 
-	// Legacy subagent loop; only used when no SubTurn spawner is set.
-	// agent_init.go always sets one, so subagents run through Pipeline.CallLLM.
 	"pkg/tools/toolloop.go RunToolLoop": "exempt: unused in production (spawner always set)",
 
-	// Self-evolution; disabled by default (evolution.enabled=false).
 	"pkg/evolution/llm_draft_generator.go LLMDraftGenerator.GenerateDraftWithEvidence": "exempt: evolution disabled by default",
 	"pkg/evolution/pattern_clusterer.go LLMPatternClusterer.BuildPatterns":             "exempt: evolution disabled by default",
 	"pkg/evolution/pattern_clusterer.go LLMPatternClusterer.BuildPatternsWithEvidence": "exempt: evolution disabled by default",
@@ -109,8 +91,6 @@ func TestAllLLMCallsAreMetered(t *testing.T) {
 	}
 }
 
-// llmCallingFuncs returns the names ("Recv.Method" or "Func") of top-level
-// functions in path that contain a .Chat / .ChatStream / .ChatStreamEvents call.
 func llmCallingFuncs(t *testing.T, path string) []string {
 	t.Helper()
 	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)

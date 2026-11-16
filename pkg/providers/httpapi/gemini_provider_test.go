@@ -930,7 +930,7 @@ func TestGeminiProvider_ChatAllowsMissingAPIKeyForCustomAPIBase(t *testing.T) {
 	}
 }
 
-func TestGeminiProvider_ChatCountsThinkingTokensAsOutput(t *testing.T) {
+func TestGeminiProvider_ChatCountsThinkingAndToolUseTokens(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -941,10 +941,11 @@ func TestGeminiProvider_ChatCountsThinkingTokensAsOutput(t *testing.T) {
 				},
 			},
 			"usageMetadata": map[string]any{
-				"promptTokenCount":     10,
-				"candidatesTokenCount": 5,
-				"thoughtsTokenCount":   20,
-				"totalTokenCount":      35,
+				"promptTokenCount":        10,
+				"candidatesTokenCount":    5,
+				"thoughtsTokenCount":      20,
+				"toolUsePromptTokenCount": 4,
+				"totalTokenCount":         39,
 			},
 		})
 	}))
@@ -955,8 +956,8 @@ func TestGeminiProvider_ChatCountsThinkingTokensAsOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
-	if resp.Usage == nil || resp.Usage.PromptTokens != 10 || resp.Usage.CompletionTokens != 25 ||
-		resp.Usage.TotalTokens != 35 {
-		t.Fatalf("Usage = %#v, want prompt=10 completion=25 total=35", resp.Usage)
+	if resp.Usage == nil || resp.Usage.PromptTokens != 14 || resp.Usage.CompletionTokens != 25 ||
+		resp.Usage.TotalTokens != 39 {
+		t.Fatalf("Usage = %#v, want prompt=14 completion=25 total=39", resp.Usage)
 	}
 }

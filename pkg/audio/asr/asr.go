@@ -20,13 +20,11 @@ type Transcriber interface {
 }
 
 type TranscriptionResponse struct {
-	Text     string  `json:"text"`
-	Language string  `json:"language,omitempty"`
-	Duration float64 `json:"duration,omitempty"`
-	// Usage and Model are set when an LLM did the transcription, so the
-	// caller can meter it. Whisper/ElevenLabs leave them empty.
-	Usage *providers.UsageInfo `json:"-"`
-	Model string               `json:"-"`
+	Text     string               `json:"text"`
+	Language string               `json:"language,omitempty"`
+	Duration float64              `json:"duration,omitempty"`
+	Usage    *providers.UsageInfo `json:"-"`
+	Model    string               `json:"-"`
 }
 
 func supportsAudioTranscription(modelCfg *config.ModelConfig) bool {
