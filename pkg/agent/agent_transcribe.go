@@ -37,6 +37,9 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 			keptMedia = append(keptMedia, ref)
 			continue
 		}
+		if result.Usage != nil {
+			usageFromContext(ctx).add(result.Usage, result.Model)
+		}
 		transcriptions = append(transcriptions, result.Text)
 	}
 

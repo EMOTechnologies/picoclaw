@@ -493,7 +493,12 @@ func (al *AgentLoop) askSideQuestion(
 				applyThinkingOption(callOpts, provider, settings, false, agent.ID)
 			}
 		}
-		return provider.Chat(ctx, callMessages, nil, model, callOpts)
+		resp, err := provider.Chat(ctx, callMessages, nil, model, callOpts)
+		if err == nil && resp != nil {
+			// /btw replies go out via PublishResponseIfNeeded, which reports this usage.
+			usageFromContext(ctx).add(resp.Usage, model)
+		}
+		return resp, err
 	}
 
 	turnCtx := newTurnContext(nil, nil, nil)

@@ -2,12 +2,16 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/audio/asr"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
@@ -286,5 +290,136 @@ func TestSpawnSubTurn_UsageRollsIntoParentAndReleasesBackgroundWork(t *testing.T
 	got := parent.usage.snapshot()
 	if calls == 0 || got == nil || got.TotalTokens != 55*calls {
 		t.Fatalf("parent usage = %+v, want %d sub-turn calls counted", got, calls)
+	}
+}
+
+type fixedUsageProvider struct {
+	content string
+	usage   providers.UsageInfo
+}
+
+func (p *fixedUsageProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	toolDefs []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	usage := p.usage
+	return &providers.LLMResponse{Content: p.content, Usage: &usage}, nil
+}
+
+func (p *fixedUsageProvider) GetDefaultModel() string { return "usage-model" }
+
+func waitForOutboundTurnUsage(t *testing.T, msgBus *bus.MessageBus, content string) bus.TurnUsage {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case outbound := <-msgBus.OutboundChan():
+			if outbound.Content != content {
+				continue
+			}
+			if outbound.TurnUsage == nil {
+				t.Fatalf("outbound %q has no TurnUsage", content)
+			}
+			return *outbound.TurnUsage
+		case <-deadline:
+			t.Fatalf("outbound %q was not published", content)
+		}
+	}
+}
+
+func TestProcessMessageSync_BtwCommandReportsTurnUsage(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         t.TempDir(),
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+		ModelList: []*config.ModelConfig{{ModelName: "test-model", Model: "openai/test-model"}},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &fixedUsageProvider{
+		content: "side answer",
+		usage:   providers.UsageInfo{PromptTokens: 40, CompletionTokens: 4, TotalTokens: 44},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	useTestSideQuestionProvider(al, provider)
+
+	al.processMessageSync(context.Background(), testInboundMessage(bus.InboundMessage{
+		Channel:  "cli",
+		SenderID: "user1",
+		ChatID:   "direct",
+		Content:  "/btw what changed?",
+	}))
+
+	got := waitForOutboundTurnUsage(t, msgBus, "side answer")
+	if got.InputTokens != 40 || got.OutputTokens != 4 || got.TotalTokens != 44 {
+		t.Fatalf("TurnUsage = %+v, want input=40 output=4 total=44", got)
+	}
+}
+
+type usageTranscriber struct{}
+
+func (usageTranscriber) Name() string { return "usage" }
+
+func (usageTranscriber) Transcribe(ctx context.Context, audioFilePath string) (*asr.TranscriptionResponse, error) {
+	return &asr.TranscriptionResponse{
+		Text:  "hello from voice",
+		Usage: &providers.UsageInfo{PromptTokens: 500, CompletionTokens: 5, TotalTokens: 505},
+		Model: "audio-model",
+	}, nil
+}
+
+func TestProcessMessageSync_VoiceTranscriptionUsageIsCounted(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &fixedUsageProvider{
+		content: "reply",
+		usage:   providers.UsageInfo{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	store := media.NewFileMediaStore()
+	audioPath := filepath.Join(tmpDir, "voice.ogg")
+	if err := os.WriteFile(audioPath, []byte("fake audio"), 0o644); err != nil {
+		t.Fatalf("write audio fixture: %v", err)
+	}
+	ref, err := store.Store(audioPath, media.MediaMeta{
+		Filename:      "voice.ogg",
+		ContentType:   "audio/ogg",
+		CleanupPolicy: media.CleanupPolicyForgetOnly,
+	}, "scope-voice")
+	if err != nil {
+		t.Fatalf("store audio fixture: %v", err)
+	}
+	al.SetMediaStore(store)
+	al.SetTranscriber(usageTranscriber{})
+
+	al.processMessageSync(context.Background(), testInboundMessage(bus.InboundMessage{
+		Channel:  "cli",
+		SenderID: "user1",
+		ChatID:   "direct",
+		Content:  "[voice]",
+		Media:    []string{ref},
+	}))
+
+	got := waitForOutboundTurnUsage(t, msgBus, "reply")
+	if got.InputTokens != 600 || got.OutputTokens != 15 || got.TotalTokens != 615 {
+		t.Fatalf("TurnUsage = %+v, want transcription + reply: input=600 output=15 total=615", got)
 	}
 }
