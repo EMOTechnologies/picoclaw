@@ -23,10 +23,14 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	turnCtx, turnCancel := context.WithCancel(ctx)
 	defer turnCancel()
 	ts.setTurnCancel(turnCancel)
+	if ts.usage == nil {
+		ts.usage = turnUsageFromContext(ctx)
+	}
 
 	// Inject turnState and AgentLoop into context so tools (e.g. spawn) can retrieve them.
 	turnCtx = withTurnState(turnCtx, ts)
 	turnCtx = WithAgentLoop(turnCtx, al)
+	turnCtx = withBackgroundTracking(turnCtx)
 
 	al.registerActiveTurn(ts)
 	defer al.clearActiveTurn(ts)
@@ -489,7 +493,11 @@ func (al *AgentLoop) askSideQuestion(
 				applyThinkingOption(callOpts, provider, settings, false, agent.ID)
 			}
 		}
-		return provider.Chat(ctx, callMessages, nil, model, callOpts)
+		resp, err := provider.Chat(ctx, callMessages, nil, model, callOpts)
+		if err == nil && resp != nil {
+			usageFromContext(ctx).add(resp.Usage, model)
+		}
+		return resp, err
 	}
 
 	turnCtx := newTurnContext(nil, nil, nil)

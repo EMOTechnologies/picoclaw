@@ -3,7 +3,11 @@ package tools
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/sipeed/picoclaw/pkg/backgroundwork"
 )
 
 // mockSpawner implements SubTurnSpawner for testing.
@@ -111,5 +115,53 @@ func TestSpawnTool_Execute_NilManager(t *testing.T) {
 	}
 	if !strings.Contains(result.ForLLM, "Subagent manager not configured") {
 		t.Errorf("Error message should mention manager not configured, got: %s", result.ForLLM)
+	}
+}
+
+type blockingSpawner struct {
+	release chan struct{}
+}
+
+func (m *blockingSpawner) SpawnSubTurn(ctx context.Context, cfg SubTurnConfig) (*ToolResult, error) {
+	<-m.release
+	return &ToolResult{ForLLM: "done"}, nil
+}
+
+func TestSpawnTool_Execute_TracksAsyncSubTurnAsBackgroundWork(t *testing.T) {
+	var mu sync.Mutex
+	pending := 0
+	finished := make(chan struct{})
+	ctx := backgroundwork.WithTracker(context.Background(), func() func() {
+		mu.Lock()
+		pending++
+		mu.Unlock()
+		return func() {
+			mu.Lock()
+			pending--
+			mu.Unlock()
+			close(finished)
+		}
+	})
+
+	spawner := &blockingSpawner{release: make(chan struct{})}
+	tool := NewSpawnTool(NewSubagentManager(&MockLLMProvider{}, "test-model", "/tmp/test"))
+	tool.SetSpawner(spawner)
+
+	result := tool.Execute(ctx, map[string]any{"task": "background task"})
+	if result == nil || result.IsError {
+		t.Fatalf("Execute() = %+v, want async success", result)
+	}
+	mu.Lock()
+	if pending != 1 {
+		mu.Unlock()
+		t.Fatalf("pending after Execute = %d, want 1", pending)
+	}
+	mu.Unlock()
+
+	close(spawner.release)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background work was not released after the sub-turn finished")
 	}
 }

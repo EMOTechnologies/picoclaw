@@ -16,7 +16,8 @@ type GitHubCopilotProvider struct {
 	client  *copilot.Client
 	session *copilot.Session
 
-	mu sync.Mutex
+	mu     sync.Mutex
+	chatMu sync.Mutex
 }
 
 func NewGitHubCopilotProvider(uri string, connectMode string, model string) (*GitHubCopilotProvider, error) {
@@ -102,9 +103,15 @@ func (p *GitHubCopilotProvider) Chat(
 		return nil, fmt.Errorf("provider closed")
 	}
 
+	p.chatMu.Lock()
+	defer p.chatMu.Unlock()
+
+	usage := &copilotUsageCollector{}
+	unsubscribe := session.On(usage.handle)
 	resp, err := session.SendAndWait(ctx, copilot.MessageOptions{
 		Prompt: string(fullcontent),
 	})
+	unsubscribe()
 	if err != nil {
 		return nil, fmt.Errorf("failed to send message to copilot: %w", err)
 	}
@@ -120,7 +127,43 @@ func (p *GitHubCopilotProvider) Chat(
 	return &LLMResponse{
 		FinishReason: "stop",
 		Content:      content,
+		Usage:        usage.info(),
 	}, nil
+}
+
+type copilotUsageCollector struct {
+	mu     sync.Mutex
+	input  int
+	output int
+	seen   bool
+}
+
+func (c *copilotUsageCollector) handle(event copilot.SessionEvent) {
+	if event.Type != copilot.SessionEventTypeAssistantUsage {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seen = true
+	if event.Data.InputTokens != nil {
+		c.input += int(*event.Data.InputTokens)
+	}
+	if event.Data.OutputTokens != nil {
+		c.output += int(*event.Data.OutputTokens)
+	}
+}
+
+func (c *copilotUsageCollector) info() *UsageInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.seen {
+		return nil
+	}
+	return &UsageInfo{
+		PromptTokens:     c.input,
+		CompletionTokens: c.output,
+		TotalTokens:      c.input + c.output,
+	}
 }
 
 func (p *GitHubCopilotProvider) GetDefaultModel() string {

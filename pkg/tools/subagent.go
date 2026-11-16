@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/backgroundwork"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -157,7 +158,11 @@ func (sm *SubagentManager) Spawn(
 	sm.tasks[taskID] = subagentTask
 
 	// Start task in background with context cancellation support
-	go sm.runTask(ctx, subagentTask, callback)
+	done := backgroundwork.Begin(ctx)
+	go func() {
+		defer done()
+		sm.runTask(ctx, subagentTask, callback)
+	}()
 
 	if label != "" {
 		return fmt.Sprintf("Spawned subagent '%s' for task: %s", label, task), nil

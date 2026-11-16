@@ -837,3 +837,26 @@ func TestProviderChatErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestParseResponseBody_IncludesCacheTokensInPromptTokens(t *testing.T) {
+	body := []byte(`{
+		"content": [{"type": "text", "text": "ok"}],
+		"stop_reason": "end_turn",
+		"usage": {
+			"input_tokens": 10,
+			"output_tokens": 20,
+			"cache_creation_input_tokens": 100,
+			"cache_read_input_tokens": 1000
+		}
+	}`)
+	got, err := parseResponseBody(body)
+	if err != nil {
+		t.Fatalf("parseResponseBody() error = %v", err)
+	}
+	if got.Usage.PromptTokens != 1110 {
+		t.Errorf("PromptTokens = %d, want 1110", got.Usage.PromptTokens)
+	}
+	if got.Usage.TotalTokens != 1130 {
+		t.Errorf("TotalTokens = %d, want 1130", got.Usage.TotalTokens)
+	}
+}

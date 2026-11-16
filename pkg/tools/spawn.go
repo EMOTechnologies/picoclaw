@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/backgroundwork"
 )
 
 type SpawnTool struct {
@@ -128,7 +130,9 @@ Task: %s`,
 	// Use spawner if available (direct SpawnSubTurn call)
 	if t.spawner != nil {
 		// Launch async sub-turn in goroutine
+		done := backgroundwork.Begin(ctx)
 		go func() {
+			defer done()
 			result, err := t.spawner.SpawnSubTurn(ctx, SubTurnConfig{
 				Model:         t.defaultModel,
 				Tools:         nil, // Will inherit from parent via context

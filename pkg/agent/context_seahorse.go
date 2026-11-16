@@ -84,6 +84,7 @@ func providerToCompleteFn(provider providers.LLMProvider, model string) seahorse
 		if err != nil {
 			return "", err
 		}
+		usageFromContext(ctx).add(resp.Usage, model)
 		return resp.Content, nil
 	}
 }
@@ -138,6 +139,7 @@ func (m *seahorseContextManager) Compact(ctx context.Context, req *CompactReques
 		return err
 	}
 
+	ctx = withBackgroundTracking(ctx)
 	_, err := m.engine.Compact(ctx, req.SessionKey, seahorse.CompactInput{
 		Force:  req.Reason == ContextCompressReasonRetry,
 		Budget: &req.Budget,

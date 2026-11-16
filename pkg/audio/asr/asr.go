@@ -20,9 +20,11 @@ type Transcriber interface {
 }
 
 type TranscriptionResponse struct {
-	Text     string  `json:"text"`
-	Language string  `json:"language,omitempty"`
-	Duration float64 `json:"duration,omitempty"`
+	Text     string               `json:"text"`
+	Language string               `json:"language,omitempty"`
+	Duration float64              `json:"duration,omitempty"`
+	Usage    *providers.UsageInfo `json:"-"`
+	Model    string               `json:"-"`
 }
 
 func supportsAudioTranscription(modelCfg *config.ModelConfig) bool {

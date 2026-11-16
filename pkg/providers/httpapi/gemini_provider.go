@@ -500,8 +500,8 @@ func parseGeminiResponse(resp *geminiGenerateContentResponse) *LLMResponse {
 	var usage *UsageInfo
 	if resp.UsageMetadata.TotalTokenCount > 0 {
 		usage = &UsageInfo{
-			PromptTokens:     resp.UsageMetadata.PromptTokenCount,
-			CompletionTokens: resp.UsageMetadata.CandidatesTokenCount,
+			PromptTokens:     resp.UsageMetadata.PromptTokenCount + resp.UsageMetadata.ToolUsePromptTokenCount,
+			CompletionTokens: resp.UsageMetadata.CandidatesTokenCount + resp.UsageMetadata.ThoughtsTokenCount,
 			TotalTokens:      resp.UsageMetadata.TotalTokenCount,
 		}
 	}
@@ -602,8 +602,8 @@ func parseGeminiStreamResponse(
 
 		if chunk.UsageMetadata.TotalTokenCount > 0 {
 			usage = &UsageInfo{
-				PromptTokens:     chunk.UsageMetadata.PromptTokenCount,
-				CompletionTokens: chunk.UsageMetadata.CandidatesTokenCount,
+				PromptTokens:     chunk.UsageMetadata.PromptTokenCount + chunk.UsageMetadata.ToolUsePromptTokenCount,
+				CompletionTokens: chunk.UsageMetadata.CandidatesTokenCount + chunk.UsageMetadata.ThoughtsTokenCount,
 				TotalTokens:      chunk.UsageMetadata.TotalTokenCount,
 			}
 		}
@@ -804,9 +804,11 @@ type geminiGenerateContentResponse struct {
 		FinishReason string `json:"finishReason"`
 	} `json:"candidates"`
 	UsageMetadata struct {
-		PromptTokenCount     int `json:"promptTokenCount"`
-		CandidatesTokenCount int `json:"candidatesTokenCount"`
-		TotalTokenCount      int `json:"totalTokenCount"`
+		PromptTokenCount        int `json:"promptTokenCount"`
+		CandidatesTokenCount    int `json:"candidatesTokenCount"`
+		ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
+		ToolUsePromptTokenCount int `json:"toolUsePromptTokenCount"`
+		TotalTokenCount         int `json:"totalTokenCount"`
 	} `json:"usageMetadata"`
 }
 

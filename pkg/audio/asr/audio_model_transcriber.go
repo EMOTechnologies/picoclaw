@@ -87,7 +87,7 @@ func (t *AudioModelTranscriber) Transcribe(ctx context.Context, audioFilePath st
 		"transcription_preview": utils.Truncate(text, 50),
 	})
 
-	return &TranscriptionResponse{Text: text}, nil
+	return &TranscriptionResponse{Text: text, Usage: resp.Usage, Model: t.modelID}, nil
 }
 
 func (t *AudioModelTranscriber) Name() string {

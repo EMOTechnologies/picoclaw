@@ -1039,3 +1039,72 @@ func newTestPicoWebSocket(t *testing.T) (*websocket.Conn, <-chan PicoMessage, fu
 	defer resp.Body.Close()
 	return clientConn, received, cleanup
 }
+
+func TestSend_IncludesTurnUsageOnCreateAndFinalizedUpdate(t *testing.T) {
+	ch := newTestPicoChannel(t)
+
+	if err := ch.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer ch.Stop(context.Background())
+
+	clientConn, received, cleanup := newTestPicoWebSocket(t)
+	defer cleanup()
+	ch.addConnForTest(&picoConn{id: "conn-1", conn: clientConn, sessionID: "sess-1"})
+
+	assertTurnUsage := func(t *testing.T, payload map[string]any, wantTotal float64) {
+		t.Helper()
+		usage, ok := payload["turn_usage"].(map[string]any)
+		if !ok {
+			t.Fatalf("turn_usage = %#v, want map payload", payload["turn_usage"])
+		}
+		if got := usage["input_tokens"]; got != float64(100) {
+			t.Fatalf("input_tokens = %#v, want 100", got)
+		}
+		if got := usage["total_tokens"]; got != wantTotal {
+			t.Fatalf("total_tokens = %#v, want %v", got, wantTotal)
+		}
+		if got := usage["model"]; got != "openai/gpt-4o" {
+			t.Fatalf("model = %#v, want openai/gpt-4o", got)
+		}
+	}
+
+	if _, err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID:    "pico:sess-1",
+		Content:   "interim",
+		Context:   bus.InboundContext{Channel: "pico", ChatID: "pico:sess-1"},
+		TurnUsage: &bus.TurnUsage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110, Model: "openai/gpt-4o"},
+	}); err != nil {
+		t.Fatalf("Send(create) error = %v", err)
+	}
+
+	select {
+	case msg := <-received:
+		if msg.Type != TypeMessageCreate {
+			t.Fatalf("message type = %q, want %q", msg.Type, TypeMessageCreate)
+		}
+		assertTurnUsage(t, msg.Payload, 110)
+	case <-time.After(time.Second):
+		t.Fatal("expected message.create to be delivered")
+	}
+
+	ch.RecordToolFeedbackMessage("pico:sess-1", "msg-progress", "🔧 `read_file`")
+	if _, err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID:    "pico:sess-1",
+		Content:   "final reply",
+		Context:   bus.InboundContext{Channel: "pico", ChatID: "pico:sess-1"},
+		TurnUsage: &bus.TurnUsage{InputTokens: 100, OutputTokens: 20, TotalTokens: 120, Model: "openai/gpt-4o"},
+	}); err != nil {
+		t.Fatalf("Send(final) error = %v", err)
+	}
+
+	select {
+	case msg := <-received:
+		if msg.Type != TypeMessageUpdate {
+			t.Fatalf("message type = %q, want %q", msg.Type, TypeMessageUpdate)
+		}
+		assertTurnUsage(t, msg.Payload, 120)
+	case <-time.After(time.Second):
+		t.Fatal("expected message.update to be delivered")
+	}
+}

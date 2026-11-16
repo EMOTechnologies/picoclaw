@@ -346,6 +346,7 @@ func (c *PicoChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]stri
 		}
 	}
 	setContextUsagePayload(payload, msg.ContextUsage)
+	setAggregatedTurnUsagePayload(payload, msg.TurnUsage)
 	outMsg := newMessage(TypeMessageCreate, payload)
 
 	if err := c.broadcastToSession(msg.ChatID, outMsg); err != nil {
@@ -361,7 +362,7 @@ func (c *PicoChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]stri
 
 // EditMessage implements channels.MessageEditor.
 func (c *PicoChannel) EditMessage(ctx context.Context, chatID string, messageID string, content string) error {
-	return c.editMessage(ctx, chatID, messageID, content, nil)
+	return c.editMessage(ctx, chatID, messageID, content, nil, nil)
 }
 
 func (c *PicoChannel) EditMessageWithPayload(
@@ -466,6 +467,7 @@ func (c *PicoChannel) FinalizeToolFeedbackMessage(ctx context.Context, msg bus.O
 	if modelName := strings.TrimSpace(msg.Context.Raw[PayloadKeyModelName]); modelName != "" {
 		payload[PayloadKeyModelName] = modelName
 	}
+	setAggregatedTurnUsagePayload(payload, msg.TurnUsage)
 	return c.finalizeTrackedToolFeedbackMessage(
 		ctx,
 		msg.ChatID,
@@ -1444,6 +1446,20 @@ func setTurnUsagePayload(payload map[string]any, inputTokens, outputTokens int) 
 	}
 }
 
+// setAggregatedTurnUsagePayload attaches the whole turn's LLM usage (all calls,
+// including subagents and background compaction) as "turn_usage".
+func setAggregatedTurnUsagePayload(payload map[string]any, u *bus.TurnUsage) {
+	if u == nil {
+		return
+	}
+	payload["turn_usage"] = map[string]any{
+		"input_tokens":  u.InputTokens,
+		"output_tokens": u.OutputTokens,
+		"total_tokens":  u.TotalTokens,
+		"model":         u.Model,
+	}
+}
+
 func picoToolCallsPayload(msg bus.OutboundMessage) ([]utils.VisibleToolCall, bool) {
 	raw := strings.TrimSpace(msg.Context.Raw[PayloadKeyToolCalls])
 	if raw == "" {
@@ -1463,10 +1479,13 @@ func (c *PicoChannel) editMessage(
 	messageID string,
 	content string,
 	contextUsage *bus.ContextUsage,
+	turnUsage *bus.TurnUsage,
 ) error {
-	return c.editMessagePayload(ctx, chatID, messageID, map[string]any{
+	payload := map[string]any{
 		PayloadKeyContent: content,
-	}, contextUsage)
+	}
+	setAggregatedTurnUsagePayload(payload, turnUsage)
+	return c.editMessagePayload(ctx, chatID, messageID, payload, contextUsage)
 }
 
 func (c *PicoChannel) editMessagePayload(

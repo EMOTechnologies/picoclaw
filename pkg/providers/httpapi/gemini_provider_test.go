@@ -929,3 +929,35 @@ func TestGeminiProvider_ChatAllowsMissingAPIKeyForCustomAPIBase(t *testing.T) {
 		t.Fatalf("Content = %q, want %q", resp.Content, "ok")
 	}
 }
+
+func TestGeminiProvider_ChatCountsThinkingAndToolUseTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"candidates": []any{
+				map[string]any{
+					"content":      map[string]any{"role": "model", "parts": []any{map[string]any{"text": "hi"}}},
+					"finishReason": "STOP",
+				},
+			},
+			"usageMetadata": map[string]any{
+				"promptTokenCount":        10,
+				"candidatesTokenCount":    5,
+				"thoughtsTokenCount":      20,
+				"toolUsePromptTokenCount": 4,
+				"totalTokenCount":         39,
+			},
+		})
+	}))
+	defer server.Close()
+
+	provider := NewGeminiProvider("test-key", server.URL, "", "picoclaw-test", 0, nil, nil)
+	resp, err := provider.Chat(t.Context(), []Message{{Role: "user", Content: "hello"}}, nil, "gemini-2.5-pro", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Usage == nil || resp.Usage.PromptTokens != 14 || resp.Usage.CompletionTokens != 25 ||
+		resp.Usage.TotalTokens != 39 {
+		t.Fatalf("Usage = %#v, want prompt=14 completion=25 total=39", resp.Usage)
+	}
+}
